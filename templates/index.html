@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Joschat</title>
+  <link rel="manifest" href="/static/manifest.json" />
+  <meta name="theme-color" content="#0f172a" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; }
+    #app { max-width: 480px; margin: 0 auto; padding: 1rem; min-height: 100vh; box-sizing: border-box; }
+    input, button, select { width: 100%; box-sizing: border-box; padding: 0.6rem; margin: 0.3rem 0; border-radius: 6px; border: 1px solid #334155; }
+    button { background: #2563eb; color: white; border: none; cursor: pointer; }
+    button:hover { background: #1d4ed8; }
+    #messages { list-style: none; padding: 0; height: 50vh; overflow-y: auto; border: 1px solid #334155; border-radius: 8px; padding: 0.5rem; }
+    #messages li { margin: 0.4rem 0; padding: 0.5rem; background: #1e293b; border-radius: 6px; font-size: 0.9rem; }
+    .verified { color: #4ade80; font-size: 0.75rem; }
+    h1 { font-size: 1.4rem; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h1>🔒 Joschat</h1>
+
+    <div id="auth-panel">
+      <input id="email" type="email" placeholder="Email" />
+      <input id="password" type="password" placeholder="Password" />
+      <input id="username" type="text" placeholder="Username (register only)" />
+      <button onclick="login()">Log In</button>
+      <button onclick="register()">Register</button>
+    </div>
+
+    <div id="chat-panel" class="hidden">
+      <p>Signed in as <strong id="whoami"></strong></p>
+      <input id="conversation-id" type="number" placeholder="Conversation ID" />
+      <button onclick="openConversation()">Open Conversation</button>
+
+      <ul id="messages"></ul>
+
+      <input id="message-text" type="text" placeholder="Type a message..." />
+      <input id="media-file" type="file" />
+      <button onclick="sendMessage()">Send</button>
+      <button onclick="verifyChain()">Verify This Conversation's Integrity</button>
+      <p id="verify-result"></p>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/static/sw.js");
+    }
+  </script>
+</body>
+</html>
