@@ -28,22 +28,46 @@ def create_app():
     app = Flask(__name__, static_folder="static", template_folder="templates")
     app.config.from_object(Config)
 
-    # Fail fast and loudly if required env vars are missing, rather than
-    # producing confusing errors deep inside a Supabase/Cloudinary call.
-    Config.validate()
+    # Don't let a missing env var crash the entire serverless function at
+    # import time — that takes down every route, including /api/health,
+    # which makes debugging a deploy much harder than it needs to be (as
+    # in: every single request just says "Python process exited with
+    # exit status 1" with no indication of which variable is missing).
+    # Instead, validate once, remember the result, and surface a clear
+    # error on real requests while keeping /api/health always reachable.
+    config_error = None
+    try:
+        Config.validate()
+    except RuntimeError as exc:
+        config_error = str(exc)
+        app.logger.error(f"Configuration error: {config_error}")
 
     CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
-    init_cloudinary()
 
-    app.register_blueprint(auth_bp, url_prefix="/api/auth")
-    app.register_blueprint(conversations_bp, url_prefix="/api/conversations")
-    app.register_blueprint(messages_bp, url_prefix="/api/messages")
-    app.register_blueprint(media_bp, url_prefix="/api/media")
-    app.register_blueprint(admin_bp, url_prefix="/api/admin")
-    app.register_blueprint(calls_bp, url_prefix="/api/calls")
+    if config_error is None:
+        init_cloudinary()
+
+        app.register_blueprint(auth_bp, url_prefix="/api/auth")
+        app.register_blueprint(conversations_bp, url_prefix="/api/conversations")
+        app.register_blueprint(messages_bp, url_prefix="/api/messages")
+        app.register_blueprint(media_bp, url_prefix="/api/media")
+        app.register_blueprint(admin_bp, url_prefix="/api/admin")
+        app.register_blueprint(calls_bp, url_prefix="/api/calls")
+    else:
+        @app.before_request
+        def _block_until_configured():
+            from flask import request as _req
+            if _req.path == "/api/health":
+                return None
+            return jsonify({
+                "error": "Server misconfigured — missing environment variables.",
+                "detail": config_error,
+            }), 500
 
     @app.route("/api/health", methods=["GET"])
     def health():
+        if config_error:
+            return jsonify({"status": "misconfigured", "detail": config_error}), 500
         return jsonify({"status": "ok", "service": "joschat-api"}), 200
 
     @app.route("/api/config", methods=["GET"])
