@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Compile Python sources
+        run: python -m compileall -q app.py api routes utils blockchain.py config.py extensions.py
+
+      - name: Validate imports
+        env:
+          FLASK_ENV: testing
+          SECRET_KEY: github-actions-test-secret
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_ANON_KEY: test-key
+          DATABASE_URL: sqlite:///ci.db
+        run: |
+          python - <<'PY'
+          import app
+          import blockchain
+          import config
+          import extensions
+          import routes.auth
+          import routes.admin
+          import routes.calls
+          import routes.conversations
+          import routes.media
+          import routes.messages
+          print('Imports OK')
+          PY
+
+      - name: Run tests
+        env:
+          FLASK_ENV: testing
+          SECRET_KEY: github-actions-test-secret
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_ANON_KEY: test-key
+          DATABASE_URL: sqlite:///ci.db
+        run: pytest -q || test $? -eq 5
