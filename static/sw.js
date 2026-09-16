@@ -1,5 +1,14 @@
-const CACHE_NAME = "joschat-cache-v1";
-const OFFLINE_URLS = ["/", "/static/js/app.js", "/static/manifest.json"];
+const CACHE_NAME = "joschat-cache-v2";
+const OFFLINE_URLS = [
+  "/",
+  "/static/js/app.js",
+  "/static/js/background.js",
+  "/static/css/style.css",
+  "/static/manifest.json",
+  "/static/favicon.ico",
+  "/static/icons/icon-192.png",
+  "/static/icons/icon-512.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -9,7 +18,14 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches
+      .keys()
+      .then((names) =>
+        Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n)))
+      )
+      .then(() => self.clients.claim())
+  );
 });
 
 self.addEventListener("fetch", (event) => {

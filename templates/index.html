@@ -4,35 +4,71 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Joschat</title>
+
   <link rel="manifest" href="/static/manifest.json" />
+  <link rel="icon" type="image/x-icon" href="/static/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png" />
+  <link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
   <meta name="theme-color" content="#0f172a" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="/static/css/style.css" />
+
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <style>
-    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; }
-    #app { max-width: 480px; margin: 0 auto; padding: 1rem; min-height: 100vh; box-sizing: border-box; }
-    input, button, select { width: 100%; box-sizing: border-box; padding: 0.6rem; margin: 0.3rem 0; border-radius: 6px; border: 1px solid #334155; }
-    button { background: #2563eb; color: white; border: none; cursor: pointer; }
-    button:hover { background: #1d4ed8; }
-    #messages { list-style: none; padding: 0; height: 50vh; overflow-y: auto; border: 1px solid #334155; border-radius: 8px; padding: 0.5rem; }
-    #messages li { margin: 0.4rem 0; padding: 0.5rem; background: #1e293b; border-radius: 6px; font-size: 0.9rem; }
-    .verified { color: #4ade80; font-size: 0.75rem; }
-    h1 { font-size: 1.4rem; }
-    .hidden { display: none; }
-  </style>
 </head>
 <body>
-  <div id="app">
-    <h1>🔒 Joschat</h1>
+  <canvas id="bg-canvas" aria-hidden="true"></canvas>
 
+  <div id="app">
     <div id="auth-panel">
-      <input id="email" type="email" placeholder="Email" />
-      <input id="password" type="password" placeholder="Password" />
-      <input id="username" type="text" placeholder="Username (register only)" />
-      <button onclick="login()">Log In</button>
-      <button onclick="register()">Register</button>
+      <div class="lockup">
+        <svg width="30" height="30" viewBox="0 0 100 100" aria-hidden="true">
+          <polygon points="50,6 90,28 90,72 50,94 10,72 10,28" fill="#2563eb" />
+          <path d="M38 46 v-8 a12 12 0 0 1 24 0 v8" fill="none" stroke="#e2e8f0" stroke-width="6" stroke-linecap="round" />
+          <rect x="34" y="46" width="32" height="24" rx="4" fill="#e2e8f0" />
+          <circle cx="50" cy="58" r="3.5" fill="#2563eb" />
+        </svg>
+        <h1>Joschat</h1>
+      </div>
+      <p class="eyebrow">end-to-end encrypted, verified block by block</p>
+
+      <div class="card">
+        <div class="tabs">
+          <button type="button" id="tab-login" class="active" onclick="setMode('login')">Log in</button>
+          <button type="button" id="tab-register" onclick="setMode('register')">Create account</button>
+        </div>
+
+        <div class="field hidden" id="field-username">
+          <label for="username">Username</label>
+          <input id="username" type="text" autocomplete="username" placeholder="yourname" />
+        </div>
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" type="email" autocomplete="email" placeholder="you@example.com" />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            placeholder="••••••••"
+            onkeydown="if(event.key==='Enter') submitAuth()"
+          />
+        </div>
+
+        <button type="button" class="btn-primary" id="submit-btn" onclick="submitAuth()">Log in</button>
+        <p class="status-line" id="auth-status"></p>
+      </div>
     </div>
 
-    <div id="chat-panel" class="hidden">
+    <div id="chat-panel" class="card hidden">
       <p>Signed in as <strong id="whoami"></strong></p>
       <input id="conversation-id" type="number" placeholder="Conversation ID" />
       <button onclick="openConversation()">Open Conversation</button>
@@ -47,6 +83,7 @@
     </div>
   </div>
 
+  <script src="/static/js/background.js"></script>
   <script src="/static/js/app.js"></script>
   <script>
     if ("serviceWorker" in navigator) {

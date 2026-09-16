@@ -24,6 +24,7 @@ let currentProfile = null;
 let supabaseClient = null;
 let currentConversationId = null;
 let realtimeChannel = null;
+let authMode = "login";
 
 const API_BASE = "/api";
 
@@ -33,31 +34,74 @@ async function loadPublicConfig() {
   supabaseClient = supabase.createClient(config.supabase_url, config.supabase_anon_key);
 }
 
+// ---------------------------------------------------------------------------
+// Auth panel — tab switching, status messages, submit routing
+// ---------------------------------------------------------------------------
+
+function setStatus(message, kind = "") {
+  const el = document.getElementById("auth-status");
+  el.textContent = message;
+  el.className = "status-line" + (kind ? ` ${kind}` : "");
+}
+
+function setMode(mode, opts = {}) {
+  authMode = mode;
+  document.getElementById("tab-login").classList.toggle("active", mode === "login");
+  document.getElementById("tab-register").classList.toggle("active", mode === "register");
+  document.getElementById("field-username").classList.toggle("hidden", mode !== "register");
+  document.getElementById("submit-btn").textContent = mode === "login" ? "Log in" : "Create account";
+  if (opts.clearStatus !== false) setStatus("");
+}
+
+async function submitAuth() {
+  const btn = document.getElementById("submit-btn");
+  btn.disabled = true;
+  try {
+    if (authMode === "login") await login();
+    else await register();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function register() {
-  const username = document.getElementById("username").value;
-  const email = document.getElementById("email").value;
+  const username = document.getElementById("username").value.trim();
+  const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
 
+  if (!username || !email || !password) {
+    return setStatus("Fill in username, email, and password.", "error");
+  }
+
+  setStatus("Creating account…");
   const res = await fetch(`${API_BASE}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, email, password }),
   });
   const data = await res.json();
-  alert(res.ok ? "Registered! Now log in." : `Error: ${data.error}`);
+  if (!res.ok) return setStatus(data.error || "Registration failed.", "error");
+
+  setStatus("Account created — log in below.", "success");
+  setMode("login", { clearStatus: false });
 }
 
 async function login() {
-  const email = document.getElementById("email").value;
+  const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
 
+  if (!email || !password) {
+    return setStatus("Enter your email and password.", "error");
+  }
+
+  setStatus("Signing in…");
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
   const data = await res.json();
-  if (!res.ok) return alert(`Login failed: ${data.error}`);
+  if (!res.ok) return setStatus(data.error || "Login failed.", "error");
 
   accessToken = data.access_token;
   currentProfile = data.profile;

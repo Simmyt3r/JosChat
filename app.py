@@ -10,6 +10,8 @@ they happen client-side via Supabase Realtime, which is what lets this
 API stay fully stateless and serverless-friendly.
 """
 
+import psycopg2
+import psycopg2.errors
 from flask import Flask, jsonify
 from flask_cors import CORS
 
@@ -93,6 +95,33 @@ def create_app():
     @app.errorhandler(413)
     def too_large(_e):
         return jsonify({"error": "File too large"}), 413
+
+    @app.errorhandler(psycopg2.errors.UndefinedTable)
+    def db_schema_missing(e):
+        # The most common cause: POSTGRES_URL points at a database that
+        # exists, but supabase/schema.sql was never run against it (or was
+        # run against a different project than the one these credentials
+        # point to). Surface that clearly instead of a bare 500 — this is
+        # a setup problem, not a bug to chase in application code.
+        app.logger.exception(e)
+        payload = {"error": "Database schema not initialized."}
+        if Config.DEBUG:
+            payload["detail"] = (
+                "A query referenced a table that doesn't exist yet "
+                f"({e}). Run supabase/schema.sql in your Supabase project's "
+                "SQL editor (Project -> SQL Editor -> New query), and make "
+                "sure POSTGRES_URL / POSTGRES_URL_NON_POOLING point at that "
+                "same project."
+            )
+        return jsonify(payload), 500
+
+    @app.errorhandler(psycopg2.Error)
+    def db_error(e):
+        app.logger.exception(e)
+        payload = {"error": "Database error."}
+        if Config.DEBUG:
+            payload["detail"] = str(e).strip()
+        return jsonify(payload), 500
 
     @app.errorhandler(500)
     def server_error(e):
