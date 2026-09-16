@@ -30,8 +30,10 @@ class Config:
     # your project's dashboard shows.
     SUPABASE_ANON_KEY = (
         os.environ.get("SUPABASE_ANON_KEY")
+        or os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY")
         or os.environ.get("SUPABASE_PUBLISHABLE_KEY")
         or os.environ.get("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY")
+        or os.environ.get("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY")
     )
 
     # Postgres (direct connection — this is how the Flask backend reads
@@ -85,7 +87,7 @@ class Config:
         if not cls.SUPABASE_URL:
             missing.append("SUPABASE_URL")
         if not cls.SUPABASE_ANON_KEY:
-            missing.append("SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)")
+            missing.append("a Supabase anon/publishable key")
         if not (cls.POSTGRES_URL or cls.POSTGRES_URL_NON_POOLING):
             missing.append("POSTGRES_URL (or POSTGRES_URL_NON_POOLING)")
         for name in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
