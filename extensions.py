@@ -25,6 +25,7 @@ Two separate things live here, deliberately kept apart:
 import psycopg2
 import psycopg2.extras
 from contextlib import contextmanager
+from urllib.parse import urlparse, unquote
 import cloudinary
 from supabase import create_client, Client
 
@@ -42,12 +43,43 @@ def init_cloudinary():
     )
 
 
+def _parse_postgres_url(url: str) -> dict:
+    """
+    Break a postgres:// URL into its parts ourselves using the standard
+    library, instead of handing the raw string to psycopg2.
+
+    Why: psycopg2.connect(dsn, sslmode=..., cursor_factory=...) internally
+    calls its own make_dsn()/parse_dsn() to merge the extra keyword args
+    into the DSN string, and that internal parser can choke on otherwise
+    valid query strings that Supabase/PgBouncer/Vercel produce (observed:
+    "invalid dsn: invalid URI query parameter" on a working, valid URL).
+    Parsing with urllib.parse and passing explicit keyword arguments to
+    psycopg2.connect() avoids that code path entirely.
+    """
+    parsed = urlparse(url)
+    return {
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
+        "user": unquote(parsed.username) if parsed.username else None,
+        "password": unquote(parsed.password) if parsed.password else None,
+        "dbname": (parsed.path or "/postgres").lstrip("/") or "postgres",
+    }
+
+
 def get_db_connection():
     """A fresh connection per call — appropriate for short-lived
     serverless function invocations. sslmode=require matches Supabase's
     Postgres requirements."""
-    dsn = Config.db_dsn()
-    conn = psycopg2.connect(dsn, sslmode="require", cursor_factory=psycopg2.extras.RealDictCursor)
+    params = _parse_postgres_url(Config.db_dsn())
+    conn = psycopg2.connect(
+        host=params["host"],
+        port=params["port"],
+        user=params["user"],
+        password=params["password"],
+        dbname=params["dbname"],
+        sslmode="require",
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
     conn.autocommit = False
     return conn
 
@@ -75,4 +107,3 @@ def db_cursor(commit: bool = False):
         raise
     finally:
         conn.close()
-
