@@ -27,11 +27,83 @@ import psycopg2.extras
 from contextlib import contextmanager
 from urllib.parse import urlparse, unquote
 import cloudinary
-from supabase import create_client, Client
+import json
+from urllib import request as urlrequest
+from urllib.error import HTTPError, URLError
 
 from config import Config
 
-supabase_auth: Client = create_client(Config.SUPABASE_URL, Config.SUPABASE_ANON_KEY)
+class SupabaseAuthError(RuntimeError):
+    pass
+
+
+class SupabaseAuthClient:
+    """Minimal Supabase Auth REST client.
+
+    Using the HTTP API directly avoids coupling startup to a particular
+    supabase-py key parser. It accepts both legacy JWT anon keys and the newer
+    opaque ``sb_publishable_...`` keys supported by Supabase.
+    """
+
+    def __init__(self, base_url: str, api_key: str):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+
+    def _request(self, path: str, method="GET", payload=None, token=None):
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers = {"apikey": self.api_key, "Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urlrequest.Request(
+            f"{self.base_url}/auth/v1{path}",
+            data=body,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=15) as response:
+                raw = response.read()
+                return json.loads(raw.decode("utf-8")) if raw else {}
+        except HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                detail = json.loads(raw)
+                message = detail.get("msg") or detail.get("message") or detail.get("error_description") or raw
+            except Exception:
+                message = raw or str(exc)
+            raise SupabaseAuthError(message) from exc
+        except URLError as exc:
+            raise SupabaseAuthError(f"Supabase Auth is unreachable: {exc.reason}") from exc
+
+    def sign_up(self, email: str, password: str):
+        return self._request("/signup", "POST", {"email": email, "password": password})
+
+    def sign_in_with_password(self, email: str, password: str):
+        return self._request(
+            "/token?grant_type=password", "POST", {"email": email, "password": password}
+        )
+
+    def get_user(self, token: str):
+        return self._request("/user", "GET", token=token)
+
+    def sign_out(self, token: str):
+        return self._request("/logout", "POST", token=token)
+
+
+_supabase_auth = None
+
+
+def get_supabase_auth() -> SupabaseAuthClient:
+    global _supabase_auth
+    if _supabase_auth is None:
+        if not Config.SUPABASE_URL or not Config.SUPABASE_ANON_KEY:
+            raise RuntimeError(
+                "Supabase Auth is not configured. Set SUPABASE_URL and "
+                "SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY / "
+                "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)."
+            )
+        _supabase_auth = SupabaseAuthClient(Config.SUPABASE_URL, Config.SUPABASE_ANON_KEY)
+    return _supabase_auth
 
 
 def init_cloudinary():

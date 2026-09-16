@@ -24,12 +24,13 @@ class Config:
 
     # Supabase Auth (used ONLY for sign-up/sign-in/token verification —
     # all other data access goes through direct Postgres, see below).
-    SUPABASE_URL = os.environ.get("SUPABASE_URL")
+    SUPABASE_URL = os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
     # Supabase has renamed "anon key" -> "publishable key" on newer
     # projects; accept either so this works regardless of which naming
     # your project's dashboard shows.
     SUPABASE_ANON_KEY = (
         os.environ.get("SUPABASE_ANON_KEY")
+        or os.environ.get("SUPABASE_PUBLISHABLE_KEY")
         or os.environ.get("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY")
     )
 
@@ -84,7 +85,7 @@ class Config:
         if not cls.SUPABASE_URL:
             missing.append("SUPABASE_URL")
         if not cls.SUPABASE_ANON_KEY:
-            missing.append("SUPABASE_ANON_KEY (or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)")
+            missing.append("SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)")
         if not (cls.POSTGRES_URL or cls.POSTGRES_URL_NON_POOLING):
             missing.append("POSTGRES_URL (or POSTGRES_URL_NON_POOLING)")
         for name in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):

@@ -16,7 +16,7 @@ GET  /api/auth/me        (Authorization: Bearer <token>)
 
 from flask import Blueprint, request, jsonify, g
 
-from extensions import supabase_auth, db_cursor
+from extensions import get_supabase_auth, db_cursor
 from utils.auth_helpers import require_auth
 
 auth_bp = Blueprint("auth", __name__)
@@ -42,11 +42,11 @@ def register():
             return jsonify({"error": "That username is already taken"}), 409
 
     try:
-        signup = supabase_auth.auth.sign_up({"email": email, "password": password})
+        signup = get_supabase_auth().sign_up(email, password)
     except Exception as exc:
         return jsonify({"error": f"Registration failed: {exc}"}), 400
 
-    if signup.user is None:
+    if not signup.get("user") or not signup["user"].get("id"):
         return jsonify({"error": "Registration failed"}), 400
 
     with db_cursor(commit=True) as cur:
@@ -55,13 +55,13 @@ def register():
             INSERT INTO profiles (id, username, phone_number, public_key, role, status)
             VALUES (%s, %s, %s, %s, 'user', 'active')
             """,
-            (signup.user.id, username, phone_number, public_key),
+            (signup["user"]["id"], username, phone_number, public_key),
         )
 
     return jsonify({
         "message": "Registration successful. Check your email to confirm your account "
                     "if email confirmation is enabled on this Supabase project.",
-        "user_id": signup.user.id,
+        "user_id": signup["user"]["id"],
     }), 201
 
 
@@ -75,21 +75,21 @@ def login():
         return jsonify({"error": "email and password are required"}), 400
 
     try:
-        result = supabase_auth.auth.sign_in_with_password({"email": email, "password": password})
+        result = get_supabase_auth().sign_in_with_password(email, password)
     except Exception:
         return jsonify({"error": "Invalid email or password"}), 401
 
-    if not result.session:
+    if not result.get("access_token"):
         return jsonify({"error": "Invalid email or password"}), 401
 
     with db_cursor() as cur:
-        cur.execute("SELECT * FROM profiles WHERE id = %s", (result.user.id,))
+        cur.execute("SELECT * FROM profiles WHERE id = %s", (result["user"]["id"],))
         profile = cur.fetchone()
 
     return jsonify({
-        "access_token": result.session.access_token,
-        "refresh_token": result.session.refresh_token,
-        "expires_at": result.session.expires_at,
+        "access_token": result["access_token"],
+        "refresh_token": result.get("refresh_token"),
+        "expires_at": result.get("expires_at"),
         "profile": dict(profile) if profile else None,
     }), 200
 
@@ -98,7 +98,7 @@ def login():
 @require_auth
 def logout():
     try:
-        supabase_auth.auth.sign_out(g.token)
+        get_supabase_auth().sign_out(g.token)
     except Exception:
         pass  # token may already be expired/invalid — logout is idempotent
     return jsonify({"message": "Logged out"}), 200

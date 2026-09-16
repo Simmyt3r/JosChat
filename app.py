@@ -16,7 +16,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 from config import Config
-from extensions import init_cloudinary
+from extensions import init_cloudinary, get_supabase_auth
 
 from routes.auth import auth_bp
 from routes.conversations import conversations_bp
@@ -40,8 +40,11 @@ def create_app():
     config_error = None
     try:
         Config.validate()
-    except RuntimeError as exc:
-        config_error = str(exc)
+        # Build the auth client without making a network request. Real key
+        # validation happens on the first Auth call, keeping cold starts cheap.
+        get_supabase_auth()
+    except Exception as exc:
+        config_error = f"{type(exc).__name__}: {exc}"
         app.logger.error(f"Configuration error: {config_error}")
 
     CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)

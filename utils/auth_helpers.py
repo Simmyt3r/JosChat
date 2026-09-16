@@ -11,7 +11,7 @@ it belongs to (not by decoding the JWT ourselves), then look up their
 from functools import wraps
 from flask import request, jsonify, g
 
-from extensions import supabase_auth, db_cursor
+from extensions import get_supabase_auth, db_cursor
 
 
 def _extract_bearer_token():
@@ -24,8 +24,8 @@ def _extract_bearer_token():
 def get_current_user(token: str):
     """Returns the Supabase auth user for a token, or None if invalid."""
     try:
-        response = supabase_auth.auth.get_user(token)
-        return response.user
+        response = get_supabase_auth().get_user(token)
+        return response if response.get("id") else None
     except Exception:
         return None
 
@@ -43,7 +43,7 @@ def require_auth(f):
             return jsonify({"error": "Invalid or expired session token"}), 401
 
         with db_cursor() as cur:
-            cur.execute("SELECT * FROM profiles WHERE id = %s", (user.id,))
+            cur.execute("SELECT * FROM profiles WHERE id = %s", (user["id"],))
             profile = cur.fetchone()
 
         if not profile:
