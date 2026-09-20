@@ -2,6 +2,10 @@
 -- Joschat — Supabase schema
 -- Run this in the Supabase SQL editor (Project -> SQL Editor -> New query).
 -- Requires the pgcrypto extension for SHA-256 hashing inside Postgres.
+--
+-- This script is idempotent: it is safe to run again on a database that
+-- already has an older version of it (tables are left untouched; functions,
+-- policies and grants are re-applied).
 -- ============================================================================
 
 create extension if not exists pgcrypto;
@@ -90,6 +94,13 @@ create table if not exists calls (
 -- concurrent messages both reading "the last block" in application code.
 -- ============================================================================
 
+
+-- NOTE: every function below pins `timezone` to UTC. Block hashes include
+-- created_at::text, and timestamptz -> text depends on the *session* time zone.
+-- Without the pin, a block hashed in one session (say UTC) and re-checked from
+-- another (say Africa/Lagos) hashes differently and validate_chain() reports
+-- tampering that never happened.
+
 create or replace function add_block(p_message_hash text)
 returns table (
     idx            bigint,
@@ -98,6 +109,7 @@ returns table (
     created_at     timestamptz
 )
 language plpgsql
+set timezone to 'UTC'
 as $$
 declare
     v_last_index  bigint;
@@ -141,6 +153,7 @@ returns table (
     blocks_checked bigint
 )
 language plpgsql
+set timezone to 'UTC'
 as $$
 declare
     rec            record;
@@ -175,6 +188,7 @@ returns table (
     verified    boolean
 )
 language plpgsql
+set timezone to 'UTC'
 as $$
 declare
     rec         record;
@@ -209,15 +223,18 @@ alter table calls enable row level security;
 -- Profiles: anyone authenticated can read basic profile info; a user can
 -- only update their own row; admins can read/update everything via the
 -- Flask backend using the service-role key (which bypasses RLS entirely).
+drop policy if exists "Profiles are viewable by authenticated users" on profiles;
 create policy "Profiles are viewable by authenticated users"
     on profiles for select
     using (auth.role() = 'authenticated');
 
+drop policy if exists "Users can update their own profile" on profiles;
 create policy "Users can update their own profile"
     on profiles for update
     using (auth.uid() = id);
 
 -- Conversations / participants: only participants can see a conversation.
+drop policy if exists "Participants can view their conversations" on conversations;
 create policy "Participants can view their conversations"
     on conversations for select
     using (
@@ -228,6 +245,7 @@ create policy "Participants can view their conversations"
         )
     );
 
+drop policy if exists "Participants can view participant lists" on conversation_participants;
 create policy "Participants can view participant lists"
     on conversation_participants for select
     using (
@@ -239,6 +257,7 @@ create policy "Participants can view participant lists"
     );
 
 -- Messages: only participants of the conversation can read/insert messages.
+drop policy if exists "Participants can view messages" on messages;
 create policy "Participants can view messages"
     on messages for select
     using (
@@ -249,6 +268,7 @@ create policy "Participants can view messages"
         )
     );
 
+drop policy if exists "Participants can send messages" on messages;
 create policy "Participants can send messages"
     on messages for insert
     with check (
@@ -264,18 +284,34 @@ create policy "Participants can send messages"
 -- chain-integrity verification); never writable directly by clients —
 -- only the add_block() function (called by the Flask backend with the
 -- service-role key) may insert.
+drop policy if exists "Authenticated users can read blocks" on blocks;
 create policy "Authenticated users can read blocks"
     on blocks for select
     using (auth.role() = 'authenticated');
 
 -- Calls: participants only.
+drop policy if exists "Call participants can view their calls" on calls;
 create policy "Call participants can view their calls"
     on calls for select
     using (auth.uid() = caller_id or auth.uid() = callee_id);
 
+drop policy if exists "Call participants can insert their calls" on calls;
 create policy "Call participants can insert their calls"
     on calls for insert
     with check (auth.uid() = caller_id);
+
+-- ============================================================================
+-- Function privileges
+-- Supabase exposes every function in the public schema to the browser through
+-- PostgREST (/rest/v1/rpc/...), and by default grants EXECUTE on them to the
+-- `anon` and `authenticated` roles. Left as is, ANY visitor could call
+-- add_block() and append junk to the chain (or hammer validate_chain(), which
+-- scans the whole table). Only the backend — which connects as `postgres`, the
+-- owner of these functions — should be able to run them.
+-- ============================================================================
+revoke all on function add_block(text) from public, anon, authenticated;
+revoke all on function validate_chain() from public, anon, authenticated;
+revoke all on function validate_conversation(bigint) from public, anon, authenticated;
 
 -- ============================================================================
 -- Realtime
@@ -283,4 +319,13 @@ create policy "Call participants can insert their calls"
 -- (INSERT events) for a given conversation_id directly via supabase-js,
 -- without needing a persistent Flask/Socket.IO server.
 -- ============================================================================
-alter publication supabase_realtime add table messages;
+do $$
+begin
+    if not exists (
+        select 1 from pg_publication_tables
+        where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'messages'
+    ) then
+        alter publication supabase_realtime add table messages;
+    end if;
+end
+$$;
