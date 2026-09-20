@@ -52,7 +52,7 @@ directly-runnable reference implementation of the same algorithm.
 ## Project layout
 
 ```
-joschat_app/
+JosChat/
 ├── app.py                  Flask app factory + routes registration
 ├── config.py                Environment-variable configuration
 ├── extensions.py             Postgres connection helper + Supabase Auth + Cloudinary setup
@@ -68,13 +68,14 @@ joschat_app/
 │   ├── media.py                 Cloudinary upload/delete
 │   ├── admin.py                  User management + full chain audit
 │   └── calls.py                   Call session logging
-├── utils/auth_helpers.py       @require_auth / @require_admin decorators
-├── supabase/schema.sql         Tables, RLS policies, add_block()/validate_chain()
-├── templates/index.html         Minimal demo UI
+├── utils/auth_helpers.py       @require_token / @require_auth / @require_admin decorators
+├── supabase/schema.sql         Tables, RLS policies, add_block()/validate_chain() (safe to re-run)
+├── templates/index.html         Demo UI
+├── tests/                       pytest suite (unit tests + optional Postgres schema tests)
 └── static/
-    ├── js/app.js                 Demo client (auth, messaging, calling)
+    ├── js/app.js                 Demo client (auth, chats, messaging; calling is a sketch)
     ├── manifest.json              PWA manifest
-    └── sw.js                       Service worker (offline caching)
+    └── sw.js                       Service worker (served at /sw.js; network-first)
 ```
 
 ## Setup
@@ -86,6 +87,14 @@ joschat_app/
    `supabase/schema.sql`, and run it. This creates all tables, the
    `add_block`/`validate_chain`/`validate_conversation` functions, RLS
    policies, and enables Realtime on `messages`.
+
+> Already ran an older `schema.sql`? Run the current one again — it is
+> idempotent, and it applies two fixes to an existing database: the hash
+> functions now pin the time zone to UTC (otherwise `validate_chain()` can report
+> false "tampering" when checked from a session in a different time zone), and
+> `add_block`/`validate_chain`/`validate_conversation` are no longer callable by
+> the public `anon`/`authenticated` roles through Supabase's auto-generated
+> `/rest/v1/rpc/...` API.
 
 ### 2. Get your environment variables
 
@@ -128,7 +137,33 @@ python app.py
 The app runs at `http://localhost:5000`. Open it in a browser to use the
 demo UI, or hit the JSON API directly (see "API reference" below).
 
-### 5. Promote your first admin user
+**Using the demo UI:** create an account for each person, log in, type the other
+person's username under *Start a chat*, and both of you enter the same **shared
+passphrase** for that chat (agree on it outside Joschat — messages are encrypted in
+the browser with a key derived from it, and the server never sees it).
+
+Running against a local, non-TLS Postgres instead of Supabase? Set
+`POSTGRES_SSLMODE=disable` (the default, `require`, is what Supabase needs).
+
+### Running the tests
+
+```bash
+pip install pytest
+pytest -q                                   # unit tests (no network, no database)
+
+# Also exercise supabase/schema.sql on a real (throw-away!) Postgres:
+createdb joschat_test
+TEST_DATABASE_URL=postgresql://localhost/joschat_test pytest -q
+```
+
+### 5. Supabase Auth settings
+
+Sign-up works whether **Confirm email** (Authentication → Providers → Email) is on
+or off. With it **on** (the default), new users must click the link in the
+confirmation email before they can log in; the UI says so instead of showing
+"invalid password". While testing you can turn it off to skip that step.
+
+### 6. Promote your first admin user
 
 Registration always creates a `role='user'` profile. To promote someone
 to admin, run this in the Supabase SQL editor:
@@ -157,13 +192,15 @@ and Preview, then redeploy.
 | GET | `/api/health` | – | Liveness check |
 | GET | `/api/config` | – | Public Supabase URL/anon key for the frontend |
 | POST | `/api/auth/register` | – | `{username, email, password, phone_number?, public_key?}` |
-| POST | `/api/auth/login` | – | `{email, password}` → `{access_token, profile}` |
+| POST | `/api/auth/login` | – | `{email, password}` → `{access_token, refresh_token, profile}` (`profile` is `null` if the account has no profile row yet) |
+| POST | `/api/auth/refresh` | – | `{refresh_token}` → a fresh `{access_token, refresh_token, profile}` |
+| POST | `/api/auth/profile` | Bearer | `{username, phone_number?}` — create the profile row for an account that has none |
 | POST | `/api/auth/logout` | Bearer | Invalidate the current session |
 | GET | `/api/auth/me` | Bearer | Current user's profile |
-| POST | `/api/conversations` | Bearer | `{participant_ids: [...], is_group?, title?}` |
+| POST | `/api/conversations` | Bearer | `{participant_usernames: [...] \| participant_ids: [...], is_group?, title?}` — returns the existing conversation (200) if the pair already has one |
 | GET | `/api/conversations` | Bearer | List the caller's conversations |
 | GET | `/api/conversations/<id>` | Bearer | Conversation + participants |
-| POST | `/api/messages/send` | Bearer | `{conversation_id, encrypted_content, media_url?}` |
+| POST | `/api/messages/send` | Bearer | `{conversation_id, encrypted_content, media_url?, media_public_id?}` |
 | GET | `/api/messages/<conversation_id>` | Bearer | Message history (paginated via `?before=`) |
 | GET | `/api/messages/verify/<conversation_id>` | Bearer | Per-message blockchain verification |
 | POST | `/api/media/upload` | Bearer | multipart `file` (+ `conversation_id`) → Cloudinary URL |
@@ -193,11 +230,13 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
 
 ## Known simplifications (documented, not hidden)
 
-- **Encryption**: `static/js/app.js` uses one shared demo AES-GCM key
-  per browser (stored in `localStorage`) rather than a full public-key
-  key-exchange protocol. The `profiles.public_key` column is provisioned
-  for a real X25519-based E2EE handshake, which is the natural next step
-  before handling real sensitive traffic.
+- **Encryption**: `static/js/app.js` encrypts each conversation with an
+  AES-GCM key derived (PBKDF2) from a passphrase the participants agree on
+  out-of-band, kept in `sessionStorage` — rather than a full public-key
+  key-exchange protocol. Security is only as good as that passphrase. The
+  `profiles.public_key` column is provisioned for a real X25519-based E2EE
+  handshake, which is the natural next step before handling real sensitive
+  traffic.
 - **Blockchain decentralisation**: the chain is a single, private,
   application-layer hash chain hosted by your Supabase project, not a
   multi-node consensus network — see Chapter 2 of the project report for
@@ -207,6 +246,10 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   policies still apply to anything the browser touches directly
   (Realtime), but Flask itself is the trust boundary — keep your
   `POSTGRES_*` credentials as secret as you would a service-role key.
+- **Calling is a sketch**: `startCall()` / `listenForIncomingCalls()` in
+  `static/js/app.js` are not wired to any button and are missing pieces (no
+  `ontrack` handler to play remote media, no "ringing" handshake). The
+  `/api/calls/*` endpoints only log call sessions.
 - **Call quality**: only a public STUN server is configured; a production
   deployment behind restrictive NATs/firewalls will need a TURN server
   (e.g. via Twilio or a self-hosted coturn instance) as a fallback.
