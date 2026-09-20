@@ -1,6 +1,6 @@
 Flask==3.0.3
 flask-cors==6.0.5
 python-dotenv==1.0.1
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.13
 cloudinary==1.41.0
 gunicorn==22.0.0
