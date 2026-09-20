@@ -15,6 +15,8 @@ GET  /api/auth/me        (Authorization: Bearer <token>)
 """
 
 from flask import Blueprint, request, jsonify, g
+import re
+
 
 from extensions import get_supabase_auth, db_cursor
 from utils.auth_helpers import require_auth
@@ -33,8 +35,15 @@ def register():
 
     if not username or not email or not password:
         return jsonify({"error": "username, email, and password are required"}), 400
-    if len(password) < 8:
-        return jsonify({"error": "password must be at least 8 characters"}), 400
+    if len(username) < 3 or len(username) > 30 or not re.fullmatch(r"[A-Za-z0-9_.-]+", username):
+        return jsonify({"error": "username must be 3-30 characters and use only letters, numbers, _, . or -"}), 400
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        return jsonify({"error": "Enter a valid email address"}), 400
+    # Supabase's default password minimum is 6 characters. Do not impose a
+    # stricter, undocumented Flask-only rule that makes otherwise valid
+    # Supabase registrations fail with HTTP 400.
+    if len(password) < 6:
+        return jsonify({"error": "password must be at least 6 characters"}), 400
 
     with db_cursor() as cur:
         cur.execute("SELECT id FROM profiles WHERE username = %s", (username,))
@@ -44,7 +53,16 @@ def register():
     try:
         signup = get_supabase_auth().sign_up(email, password)
     except Exception as exc:
-        return jsonify({"error": f"Registration failed: {exc}"}), 400
+        message = str(exc).strip() or "Supabase rejected the registration request"
+        lower = message.lower()
+        if "invalid api key" in lower or "api key" in lower and "invalid" in lower:
+            # This is server configuration, not bad user input. Returning 500
+            # makes the real cause visible in logs/clients instead of disguising
+            # it as a registration validation error.
+            return jsonify({"error": "Authentication service is misconfigured: invalid Supabase API key"}), 500
+        if "already registered" in lower or "already been registered" in lower:
+            return jsonify({"error": "An account with this email already exists"}), 409
+        return jsonify({"error": f"Registration failed: {message}"}), 400
 
     if not signup.get("user") or not signup["user"].get("id"):
         return jsonify({"error": "Registration failed"}), 400
