@@ -70,17 +70,51 @@
     </div>
 
     <div id="chat-panel" class="card hidden">
-      <p>Signed in as <strong id="whoami"></strong></p>
-      <input id="conversation-id" type="number" placeholder="Conversation ID" />
-      <button onclick="openConversation()">Open Conversation</button>
+      <div class="chat-header">
+        <p>Signed in as <strong id="whoami"></strong></p>
+        <button type="button" class="btn-secondary btn-small" onclick="signOut()">Sign out</button>
+      </div>
 
-      <ul id="messages"></ul>
+      <!-- Shown only when the account exists but has no profile row yet -->
+      <div id="profile-setup" class="hidden">
+        <p>Your account is confirmed but has no username yet. Pick one to finish setting up.</p>
+        <input id="setup-username" type="text" autocomplete="username" placeholder="Choose a username" />
+        <button type="button" onclick="createProfile()">Save username</button>
+      </div>
 
-      <input id="message-text" type="text" placeholder="Type a message..." />
-      <input id="media-file" type="file" />
-      <button onclick="sendMessage()">Send</button>
-      <button onclick="verifyChain()">Verify This Conversation's Integrity</button>
-      <p id="verify-result"></p>
+      <div id="chat-main">
+        <div class="new-chat">
+          <input id="new-chat-username" type="text" autocomplete="off" placeholder="Start a chat with (username)"
+                 onkeydown="if(event.key==='Enter') startChat()" />
+          <button type="button" onclick="startChat()">Start chat</button>
+        </div>
+
+        <ul id="conversation-list" class="conv-list"></ul>
+
+        <div id="conversation-view" class="hidden">
+          <p class="conv-title">Chat with <strong id="conv-title"></strong>
+            <span id="live-status" class="live-status"></span></p>
+
+          <div class="passphrase-row">
+            <input id="conv-passphrase" type="password" autocomplete="off"
+                   placeholder="Shared passphrase for this chat"
+                   onkeydown="if(event.key==='Enter') applyPassphrase()" />
+            <button type="button" class="btn-secondary" onclick="applyPassphrase()">Unlock</button>
+          </div>
+          <p class="hint">Messages are encrypted in your browser with this passphrase. Agree on it with
+            the other person outside Joschat — if yours differs, their messages show as “unable to decrypt”.</p>
+
+          <ul id="messages"></ul>
+
+          <input id="message-text" type="text" placeholder="Type a message..." autocomplete="off"
+                 onkeydown="if(event.key==='Enter') sendMessage()" />
+          <input id="media-file" type="file" />
+          <button type="button" id="send-btn" onclick="sendMessage()">Send</button>
+          <button type="button" class="btn-secondary" onclick="verifyChain()">Verify this conversation's integrity</button>
+          <p id="verify-result"></p>
+        </div>
+        <p id="chat-status" class="status-line"></p>
+      </div>
     </div>
   </div>
 
@@ -88,7 +122,7 @@
   <script src="/static/js/app.js"></script>
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/static/sw.js");
+      navigator.serviceWorker.register("/sw.js");
     }
   </script>
 </body>

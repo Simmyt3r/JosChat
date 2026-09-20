@@ -229,6 +229,7 @@ body {
 
 #chat-panel input[type="number"],
 #chat-panel input[type="text"],
+#chat-panel input[type="password"],
 #chat-panel input[type="file"] {
   width: 100%;
   box-sizing: border-box;
@@ -256,6 +257,46 @@ body {
 }
 
 #chat-panel button:hover { background: var(--accent-hover); }
+
+#chat-panel button:disabled { opacity: 0.6; cursor: default; }
+
+/* Secondary (outlined) buttons, chat header, conversation list */
+#chat-panel .btn-secondary {
+  background: transparent;
+  border: 1px solid var(--input-border);
+  color: var(--text);
+}
+#chat-panel .btn-secondary:hover { background: var(--input-bg); border-color: var(--input-border-focus); }
+#chat-panel .btn-small { width: auto; padding: 0.35rem 0.75rem; font-size: 0.8rem; margin: 0; }
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.chat-header p { margin: 0; }
+
+.conv-list { list-style: none; padding: 0; margin: 0.6rem 0; }
+.conv-list li { margin: 0.25rem 0; }
+#chat-panel .conv-item { text-align: left; margin: 0; font-weight: 500; }
+#chat-panel .conv-item.active { border-color: var(--accent-light); color: var(--accent-light); }
+.conv-empty { color: var(--text-faint); font-size: 0.85rem; }
+
+.conv-title { margin: 0.8rem 0 0.3rem !important; }
+.live-status { color: var(--text-faint); font-size: 0.75rem; font-family: var(--font-mono); margin-left: 0.3rem; }
+.passphrase-row { display: flex; gap: 0.5rem; align-items: center; }
+.passphrase-row input { flex: 1; }
+#chat-panel .passphrase-row button { width: auto; margin: 0.3rem 0; padding: 0.6rem 0.9rem; }
+#chat-panel .hint { font-size: 0.75rem; color: var(--text-faint); margin: 0.2rem 0 0.4rem; line-height: 1.35; }
+
+#messages li.mine { border-color: var(--accent); margin-left: 1.5rem; }
+#messages li.theirs { margin-right: 1.5rem; }
+#messages .sender { font-size: 0.72rem; color: var(--text-dim); margin-bottom: 0.15rem; }
+#messages .locked { color: var(--text-faint); font-style: italic; }
+#messages li { overflow-wrap: anywhere; }
+#chat-panel #verify-result { margin: 0.4rem 0 0; }
 
 .hidden { display: none !important; }
 
