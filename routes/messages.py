@@ -15,13 +15,21 @@ indices — something a naive "read last block in Python, then insert"
 approach cannot guarantee under concurrent requests.
 """
 
+from datetime import datetime
+
 from flask import Blueprint, request, jsonify, g
 
+from config import Config
 from extensions import db_cursor
 from blockchain import hash_message
 from utils.auth_helpers import require_auth
 
 messages_bp = Blueprint("messages", __name__)
+
+MAX_CIPHERTEXT_CHARS = 200_000
+
+def _cloudinary_prefix() -> str:
+    return f"https://res.cloudinary.com/{Config.CLOUDINARY_CLOUD_NAME}/"
 
 
 def _is_participant(cur, conversation_id, user_id) -> bool:
@@ -46,6 +54,17 @@ def send_message():
 
     if not conversation_id or not encrypted_content:
         return jsonify({"error": "conversation_id and encrypted_content are required"}), 400
+    if not isinstance(conversation_id, int) or isinstance(conversation_id, bool):
+        return jsonify({"error": "conversation_id must be an integer"}), 400
+    if not isinstance(encrypted_content, str) or len(encrypted_content) > MAX_CIPHERTEXT_CHARS:
+        return jsonify({"error": "encrypted_content must be a string under 200,000 characters"}), 400
+    # Only ever store links that our own Cloudinary upload route can produce,
+    # so a message can't smuggle in an arbitrary/malicious URL for other
+    # participants' clients to render.
+    if media_url is not None and not (
+        isinstance(media_url, str) and media_url.startswith(_cloudinary_prefix())
+    ):
+        return jsonify({"error": "media_url must be a URL returned by /api/media/upload"}), 400
 
     message_hash = hash_message(encrypted_content)
 
@@ -91,8 +110,16 @@ def send_message():
 @messages_bp.route("/<int:conversation_id>", methods=["GET"])
 @require_auth
 def get_messages(conversation_id):
-    limit = min(int(request.args.get("limit", 50)), 200)
+    try:
+        limit = max(1, min(int(request.args.get("limit", 50)), 200))
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
     before = request.args.get("before")  # ISO timestamp, for pagination
+    if before:
+        try:
+            datetime.fromisoformat(before.replace("Z", "+00:00"))
+        except ValueError:
+            return jsonify({"error": "before must be an ISO-8601 timestamp"}), 400
 
     with db_cursor() as cur:
         if not _is_participant(cur, conversation_id, g.profile["id"]):

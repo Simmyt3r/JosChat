@@ -34,7 +34,19 @@ from urllib.error import HTTPError, URLError
 from config import Config
 
 class SupabaseAuthError(RuntimeError):
-    pass
+    """Raised for any failed call to Supabase Auth.
+
+    `status` is the HTTP status GoTrue answered with (None if it was
+    unreachable) and `code` is GoTrue's machine-readable `error_code`
+    (e.g. "email_not_confirmed", "invalid_credentials"), so callers can
+    tell a wrong password apart from a misconfigured API key or an outage
+    instead of reporting every failure as "invalid credentials".
+    """
+
+    def __init__(self, message, status=None, code=None):
+        super().__init__(message)
+        self.status = status
+        self.code = code
 
 
 class SupabaseAuthClient:
@@ -66,14 +78,17 @@ class SupabaseAuthClient:
                 return json.loads(raw.decode("utf-8")) if raw else {}
         except HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
+            code = None
             try:
                 detail = json.loads(raw)
+                code = detail.get("error_code") or detail.get("error")
                 message = detail.get("msg") or detail.get("message") or detail.get("error_description") or raw
             except Exception:
                 message = raw or str(exc)
-            raise SupabaseAuthError(message) from exc
-        except URLError as exc:
-            raise SupabaseAuthError(f"Supabase Auth is unreachable: {exc.reason}") from exc
+            raise SupabaseAuthError(message, status=exc.code, code=code) from exc
+        except (URLError, TimeoutError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise SupabaseAuthError(f"Supabase Auth is unreachable: {reason}") from exc
 
     def sign_up(self, email: str, password: str):
         return self._request("/signup", "POST", {"email": email, "password": password})
@@ -81,6 +96,11 @@ class SupabaseAuthClient:
     def sign_in_with_password(self, email: str, password: str):
         return self._request(
             "/token?grant_type=password", "POST", {"email": email, "password": password}
+        )
+
+    def refresh_session(self, refresh_token: str):
+        return self._request(
+            "/token?grant_type=refresh_token", "POST", {"refresh_token": refresh_token}
         )
 
     def get_user(self, token: str):
@@ -140,8 +160,9 @@ def _parse_postgres_url(url: str) -> dict:
 
 def get_db_connection():
     """A fresh connection per call — appropriate for short-lived
-    serverless function invocations. sslmode=require matches Supabase's
-    Postgres requirements."""
+    serverless function invocations. Defaults to sslmode=require, which
+    Supabase's Postgres needs; set POSTGRES_SSLMODE=disable only for a
+    throw-away local Postgres."""
     params = _parse_postgres_url(Config.db_dsn())
     conn = psycopg2.connect(
         host=params["host"],
@@ -149,7 +170,7 @@ def get_db_connection():
         user=params["user"],
         password=params["password"],
         dbname=params["dbname"],
-        sslmode="require",
+        sslmode=Config.POSTGRES_SSLMODE,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
     conn.autocommit = False

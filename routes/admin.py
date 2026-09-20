@@ -42,7 +42,9 @@ def suspend_user(user_id):
             (str(user_id),),
         )
         user = cur.fetchone()
-    return jsonify({"user": dict(user) if user else None}), 200
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"user": dict(user)}), 200
 
 
 @admin_bp.route("/users/<uuid:user_id>/reinstate", methods=["POST"])
@@ -55,7 +57,9 @@ def reinstate_user(user_id):
             (str(user_id),),
         )
         user = cur.fetchone()
-    return jsonify({"user": dict(user) if user else None}), 200
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"user": dict(user)}), 200
 
 
 @admin_bp.route("/blockchain/validate", methods=["GET"])

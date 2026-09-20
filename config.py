@@ -55,6 +55,8 @@ class Config:
     POSTGRES_HOST = os.environ.get("POSTGRES_HOST")
     POSTGRES_DATABASE = os.environ.get("POSTGRES_DATABASE")
     POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD")
+    # Supabase requires TLS. Only override for a local, non-TLS Postgres.
+    POSTGRES_SSLMODE = os.environ.get("POSTGRES_SSLMODE", "require")
 
     # Cloudinary
     CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME")

@@ -91,6 +91,18 @@ def create_app():
         from flask import render_template
         return render_template("index.html")
 
+    @app.route("/sw.js", methods=["GET"])
+    def service_worker():
+        # A service worker can only control pages at or below its own URL, so
+        # it has to be served from the site root ("/sw.js") — from
+        # /static/sw.js it could never control the app at "/". It must also
+        # never be cached by the browser/CDN, or updates would not roll out.
+        from flask import send_from_directory
+        resp = send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["Service-Worker-Allowed"] = "/"
+        return resp
+
     @app.errorhandler(404)
     def not_found(_e):
         return jsonify({"error": "Not found"}), 404

@@ -19,9 +19,19 @@ from flask import Blueprint, request, jsonify, g
 import cloudinary.uploader
 
 from config import Config
+from extensions import db_cursor
 from utils.auth_helpers import require_auth
 
 media_bp = Blueprint("media", __name__)
+
+
+def _is_participant(conversation_id, user_id) -> bool:
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM conversation_participants WHERE conversation_id = %s AND user_id = %s",
+            (conversation_id, user_id),
+        )
+        return cur.fetchone() is not None
 
 
 def _allowed_file(filename: str) -> bool:
@@ -43,8 +53,12 @@ def upload_media():
     if not _allowed_file(file.filename):
         return jsonify({"error": "Unsupported file type"}), 415
 
-    conversation_id = request.form.get("conversation_id", "unassigned")
-    folder = f"joschat/{conversation_id}"
+    conversation_id = request.form.get("conversation_id", "")
+    if not conversation_id.isdigit():
+        return jsonify({"error": "conversation_id (integer) is required"}), 400
+    if not _is_participant(int(conversation_id), g.profile["id"]):
+        return jsonify({"error": "Not a participant in this conversation"}), 403
+    folder = f"joschat/{int(conversation_id)}"
     public_id = f"{uuid.uuid4().hex}"
 
     try:
@@ -70,6 +84,14 @@ def upload_media():
 @media_bp.route("/<path:public_id>", methods=["DELETE"])
 @require_auth
 def delete_media(public_id):
+    # Assets live under joschat/<conversation_id>/…; only participants of that
+    # conversation may delete them (not any logged-in user, and not assets
+    # outside this app's folder).
+    parts = public_id.split("/")
+    if len(parts) < 3 or parts[0] != "joschat" or not parts[1].isdigit():
+        return jsonify({"error": "Not found"}), 404
+    if not _is_participant(int(parts[1]), g.profile["id"]):
+        return jsonify({"error": "Not a participant in this conversation"}), 403
     try:
         result = cloudinary.uploader.destroy(public_id, invalidate=True)
     except Exception as exc:

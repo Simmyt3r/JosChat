@@ -6,12 +6,20 @@ header, where <access_token> is the JWT Supabase issued when the user
 logged in (see routes/auth.py). We verify it by asking Supabase Auth who
 it belongs to (not by decoding the JWT ourselves), then look up their
 `profiles` row with a direct Postgres query.
+
+Three decorators, each building on the previous one:
+
+  @require_token  valid Supabase session only (g.user, g.token). Used by the
+                  few routes that must work for an account that has no
+                  `profiles` row yet (see POST /api/auth/profile).
+  @require_auth   require_token + an active `profiles` row (g.profile).
+  @require_admin  stack under @require_auth to also require role='admin'.
 """
 
 from functools import wraps
 from flask import request, jsonify, g
 
-from extensions import get_supabase_auth, db_cursor
+from extensions import get_supabase_auth, db_cursor, SupabaseAuthError
 
 
 def _extract_bearer_token():
@@ -22,38 +30,60 @@ def _extract_bearer_token():
 
 
 def get_current_user(token: str):
-    """Returns the Supabase auth user for a token, or None if invalid."""
+    """Returns the Supabase auth user for a token, or None if the token is
+    invalid/expired. Raises SupabaseAuthError only when Supabase itself is
+    unreachable or failing (so callers can answer 502 instead of wrongly
+    telling the user their session expired)."""
     try:
         response = get_supabase_auth().get_user(token)
-        return response if response.get("id") else None
+    except SupabaseAuthError as exc:
+        if exc.status is None or exc.status >= 500:
+            raise
+        return None
     except Exception:
         return None
+    return response if response.get("id") else None
 
 
-def require_auth(f):
-    """Attaches g.user (Supabase auth user) and g.profile (profiles row)."""
+def require_token(f):
+    """Attaches g.user (Supabase auth user) and g.token."""
     @wraps(f)
     def wrapper(*args, **kwargs):
         token = _extract_bearer_token()
         if not token:
             return jsonify({"error": "Missing or malformed Authorization header"}), 401
 
-        user = get_current_user(token)
+        try:
+            user = get_current_user(token)
+        except SupabaseAuthError as exc:
+            return jsonify({"error": f"Authentication service unavailable: {exc}"}), 502
         if user is None:
             return jsonify({"error": "Invalid or expired session token"}), 401
 
+        g.user = user
+        g.token = token
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def require_auth(f):
+    """Attaches g.user, g.token and g.profile (the profiles row)."""
+    @wraps(f)
+    @require_token
+    def wrapper(*args, **kwargs):
         with db_cursor() as cur:
-            cur.execute("SELECT * FROM profiles WHERE id = %s", (user["id"],))
+            cur.execute("SELECT * FROM profiles WHERE id = %s", (g.user["id"],))
             profile = cur.fetchone()
 
         if not profile:
-            return jsonify({"error": "No profile found for this account"}), 404
+            return jsonify({
+                "error": "No profile found for this account",
+                "code": "profile_missing",
+            }), 404
         if profile.get("status") == "suspended":
             return jsonify({"error": "This account has been suspended"}), 403
 
-        g.user = user
         g.profile = dict(profile)
-        g.token = token
         return f(*args, **kwargs)
     return wrapper
 
