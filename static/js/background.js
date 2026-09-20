@@ -18,8 +18,15 @@
   if (!canvas || !canvas.getContext) return;
   const ctx = canvas.getContext("2d");
 
-  const ACCENT = "37, 99, 235";       // #2563eb
-  const ACCENT_LIGHT = "96, 165, 250"; // #60a5fa
+  // Read from CSS (--bg-chain / --bg-glow) so both themes look right.
+  let ACCENT = "47, 98, 232";
+  let ACCENT_LIGHT = "130, 168, 255";
+  function readColors() {
+    const cs = getComputedStyle(document.documentElement);
+    ACCENT = cs.getPropertyValue("--bg-chain").trim() || ACCENT;
+    ACCENT_LIGHT = cs.getPropertyValue("--bg-glow").trim() || ACCENT_LIGHT;
+  }
+  readColors();
 
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -28,6 +35,8 @@
   let chains = [];
   let pulses = [];
   let running = true;
+  let paused = false;      // set by JoschatBackground.setActive(false) while chatting
+  let looping = false;
   let lastTime = performance.now();
   let pulseTimer = 0;
 
@@ -166,11 +175,18 @@
   }
 
   function loop(now) {
-    if (!running) return;
+    if (!running || paused) { looping = false; return; }
     const dt = Math.min(64, now - lastTime);
     lastTime = now;
     step(dt);
     draw();
+    requestAnimationFrame(loop);
+  }
+
+  function kick() {
+    if (looping || reduceMotion || !running || paused) return;
+    looping = true;
+    lastTime = performance.now();
     requestAnimationFrame(loop);
   }
 
@@ -181,9 +197,8 @@
       draw(); // one static frame, no motion, no pulses
       return;
     }
-    lastTime = performance.now();
     pulseTimer = rand(600, 1600);
-    requestAnimationFrame(loop);
+    kick();
   }
 
   let resizeTimer = null;
@@ -197,11 +212,24 @@
 
   document.addEventListener("visibilitychange", () => {
     running = !document.hidden;
-    if (running && !reduceMotion) {
-      lastTime = performance.now();
-      requestAnimationFrame(loop);
-    }
+    kick();
   });
+
+  window.addEventListener("joschat:theme", () => {
+    readColors();
+    if (reduceMotion) draw();
+  });
+
+  // The app calls this: the chain animation only plays on the log-in screens.
+  window.JoschatBackground = {
+    setActive(active) {
+      paused = !active;
+      if (active) {
+        resize();
+        if (reduceMotion) draw(); else kick();
+      }
+    },
+  };
 
   start();
 })();

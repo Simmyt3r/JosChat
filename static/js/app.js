@@ -23,12 +23,29 @@
  *
  * The passphrase (and the login session) live in sessionStorage: they survive
  * a page reload but are wiped when the tab is closed.
+ *
+ * UI NOTES
+ *   - Every message shows a hexagonal "seal". Pressing "Verify chat" asks the
+ *     server to recompute the hash chain and sweeps a result over each seal.
+ *   - All user-supplied text is inserted with textContent, never innerHTML.
  */
 
 const API_BASE = "/api";
 const SESSION_KEY = "joschat_session";
 const PASSPHRASE_KEY_PREFIX = "joschat_pass_";
+const THEME_KEY = "joschat_theme";
 const POLL_INTERVAL_MS = 4000;
+
+// Mirrors the server: 25 MB ceiling and the same allowed extensions.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const ALLOWED_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm", "mp3", "wav", "ogg", "m4a"]);
+const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+const VIDEO_EXT = new Set(["mp4", "mov", "webm"]);
+const AUDIO_EXT = new Set(["mp3", "wav", "ogg", "m4a"]);
+const USERNAME_RE = /^[A-Za-z0-9_.-]{3,30}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const GROUP_GAP_MS = 5 * 60 * 1000;   // messages this close together share a bubble group
+const AVATAR_HUES = [215, 262, 322, 8, 32, 158, 190];
 
 let accessToken = null;
 let refreshToken = null;
@@ -43,17 +60,54 @@ let pollTimer = null;
 let authMode = "login";
 let refreshInFlight = null;
 
-// Messages of the open conversation, oldest first. Kept in memory so they can
-// be re-rendered when the passphrase changes, and de-duplicated by id (a
-// message can arrive via fetch, Realtime and polling).
-let messageStore = [];
+let conversations = null;         // null = not loaded yet, [] = loaded but empty
+let messageStore = [];            // messages of the open conversation, oldest first
 const derivedKeys = new Map();    // conversationId -> CryptoKey
+const plainCache = new Map();     // messageId -> decrypted text (or undefined if it failed)
+const messageStatus = new Map();  // messageId -> "verified" | "tampered" (session only)
+const expandedBlocks = new Set(); // messageIds whose block details are open
+const drafts = new Map();         // conversationId -> unsent text
+
+let unlockOpen = false;           // passphrase panel open while already unlocked (changing it)
+let pendingFile = null;
+let pendingThumbUrl = null;
+let sending = false;
+let verifying = false;
+let historyPushed = false;
+let lastRenderedCount = 0;
+let lastNetToast = 0;
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
 const $ = (id) => document.getElementById(id);
+const SVG_NS = "http://www.w3.org/2000/svg";
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const isNarrow = () => window.matchMedia("(max-width: 859px)").matches;
+const canHover = () => window.matchMedia("(hover: hover)").matches;
+const isTouchKeyboard = () => window.matchMedia("(pointer: coarse)").matches;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function iconSvg(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(SVG_NS, "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.appendChild(use);
+  return svg;
+}
+
+function setIcon(button, name) {
+  const use = button.querySelector("use");
+  if (use) use.setAttribute("href", `#i-${name}`);
+}
+
+function setBusy(button, busy) {
+  button.classList.toggle("is-busy", busy);
+  button.disabled = busy;
+}
 
 async function loadPublicConfig() {
   try {
@@ -77,51 +131,169 @@ function ensureSupabaseClient() {
   return supabaseClient;
 }
 
-function setStatus(message, kind = "") {
-  const el = $("auth-status");
-  el.textContent = message;
-  el.className = "status-line" + (kind ? ` ${kind}` : "");
+async function readJson(res) {
+  try {
+    return await res.json();
+  } catch {
+    return { error: `Unexpected response from the server (HTTP ${res.status})` };
+  }
 }
 
-function setChatStatus(message, kind = "") {
-  const el = $("chat-status");
-  el.textContent = message;
-  el.className = "status-line" + (kind ? ` ${kind}` : "");
+// --- Toasts -----------------------------------------------------------------
+
+function toast(message, kind = "info", ms) {
+  const box = $("toasts");
+  const el = document.createElement("div");
+  el.className = `toast${kind === "error" ? " is-error" : kind === "success" ? " is-success" : ""}`;
+  if (kind === "error") el.setAttribute("role", "alert");
+  if (kind !== "info") el.appendChild(iconSvg(kind === "error" ? "alert" : "check"));
+  const text = document.createElement("span");
+  text.textContent = message;
+  el.appendChild(text);
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "icon-btn";
+  close.setAttribute("aria-label", "Dismiss");
+  close.appendChild(iconSvg("x"));
+  el.appendChild(close);
+
+  const remove = () => el.remove();
+  close.addEventListener("click", remove);
+  box.appendChild(el);
+  while (box.children.length > 3) box.firstElementChild.remove();
+  setTimeout(remove, ms || (kind === "error" ? 6500 : 3800));
+}
+
+// --- Avatars ----------------------------------------------------------------
+
+function avatarHue(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return AVATAR_HUES[h % AVATAR_HUES.length];
+}
+
+function paintAvatar(el, name) {
+  const clean = String(name || "?").replace(/^@/, "");
+  el.style.setProperty("--h", avatarHue(clean));
+  el.textContent = (clean[0] || "?").toUpperCase();
+}
+
+// --- Views ------------------------------------------------------------------
+
+function showView(name) {   // "auth" | "setup" | "chat"
+  $("auth-view").hidden = name !== "auth";
+  $("setup-view").hidden = name !== "setup";
+  $("chat-shell").hidden = name !== "chat";
+  document.body.classList.toggle("in-app", name === "chat");
+  if (window.JoschatBackground) window.JoschatBackground.setActive(name !== "chat");
+  $("boot").hidden = true;
+}
+
+// --- Theme ------------------------------------------------------------------
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem(THEME_KEY, theme); } catch { /* ignore */ }
+  $("theme-color").content = theme === "light" ? "#f2f5fb" : "#0d1322";
+  const btn = $("theme-btn");
+  // The button shows the theme you would switch TO.
+  setIcon(btn, theme === "light" ? "moon" : "sun");
+  const label = theme === "light" ? "Switch to dark theme" : "Switch to light theme";
+  btn.setAttribute("aria-label", label);
+  btn.title = label;
+  window.dispatchEvent(new Event("joschat:theme"));
+}
+
+function toggleTheme() {
+  applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
 }
 
 // ---------------------------------------------------------------------------
-// Auth panel — tab switching, status messages, submit routing
+// Log in / create account
 // ---------------------------------------------------------------------------
+
+const AUTH_FIELDS = {
+  username: { input: "username", msg: "username-msg" },
+  email: { input: "email", msg: "email-msg" },
+  password: { input: "password", msg: "password-msg" },
+};
+
+function setAuthMessage(text, kind = "error") {
+  const el = $("auth-message");
+  el.textContent = text || "";
+  el.hidden = !text;
+  el.className = `banner ${kind === "success" ? "is-success" : "is-error"}`;
+}
+
+function setFieldError(key, text) {
+  const { input, msg } = AUTH_FIELDS[key];
+  const inputEl = $(input), msgEl = $(msg);
+  inputEl.setAttribute("aria-invalid", text ? "true" : "false");
+  msgEl.classList.toggle("is-error", Boolean(text));
+  msgEl.textContent = text || msgEl.dataset.hint || "";
+}
+
+function clearAuthErrors() {
+  for (const key of Object.keys(AUTH_FIELDS)) setFieldError(key, "");
+  setAuthMessage("");
+}
 
 function setMode(mode, opts = {}) {
   authMode = mode;
-  $("tab-login").classList.toggle("active", mode === "login");
-  $("tab-register").classList.toggle("active", mode === "register");
-  $("field-username").classList.toggle("hidden", mode !== "register");
-  $("password").autocomplete = mode === "login" ? "current-password" : "new-password";
-  $("submit-btn").textContent = mode === "login" ? "Log in" : "Create account";
-  if (opts.clearStatus !== false) setStatus("");
+  const register = mode === "register";
+  $("tab-login").setAttribute("aria-selected", String(!register));
+  $("tab-register").setAttribute("aria-selected", String(register));
+  $("tab-login").tabIndex = register ? -1 : 0;
+  $("tab-register").tabIndex = register ? 0 : -1;
+  $("field-username").hidden = !register;
+  $("password").autocomplete = register ? "new-password" : "current-password";
+  $("password-msg").dataset.hint = register ? "At least 6 characters." : "";
+  $("username-msg").dataset.hint = "3–30 characters: letters, numbers, _ . or -";
+  $("submit-btn").querySelector(".btn-label").textContent = register ? "Create account" : "Log in";
+  $("auth-form-wrap").hidden = false;
+  $("auth-tagline").hidden = false;
+  $("check-email").hidden = true;
+  clearAuthErrors();
+  if (opts.keepMessage) setAuthMessage(opts.keepMessage.text, opts.keepMessage.kind);
 }
 
-async function submitAuth() {
+function validateAuthForm() {
+  const errors = {};
+  const email = $("email").value.trim();
+  const password = $("password").value;
+  if (authMode === "register") {
+    const username = $("username").value.trim();
+    if (!username) errors.username = "Choose a username.";
+    else if (!USERNAME_RE.test(username)) errors.username = "Use 3–30 letters, numbers, _ . or - (no spaces).";
+  }
+  if (!email) errors.email = "Enter your email address.";
+  else if (!EMAIL_RE.test(email)) errors.email = "That doesn't look like an email address.";
+  if (!password) errors.password = authMode === "register" ? "Choose a password." : "Enter your password.";
+  else if (authMode === "register" && password.length < 6) errors.password = "Use at least 6 characters.";
+  return errors;
+}
+
+async function submitAuth(event) {
+  event.preventDefault();
+  clearAuthErrors();
+  const errors = validateAuthForm();
+  const keys = Object.keys(errors);
+  if (keys.length) {
+    for (const key of keys) setFieldError(key, errors[key]);
+    $(AUTH_FIELDS[keys[0]].input).focus();
+    return;
+  }
+
   const btn = $("submit-btn");
-  btn.disabled = true;
+  setBusy(btn, true);
   try {
     if (authMode === "login") await login();
     else await register();
   } catch (err) {
     console.error(err);
-    setStatus("Could not reach the server. Check your connection and try again.", "error");
+    setAuthMessage("Can't reach Joschat. Check your connection and try again.");
   } finally {
-    btn.disabled = false;
-  }
-}
-
-async function readJson(res) {
-  try {
-    return await res.json();
-  } catch {
-    return { error: `Unexpected response from server (HTTP ${res.status})` };
+    setBusy(btn, false);
   }
 }
 
@@ -130,39 +302,50 @@ async function register() {
   const email = $("email").value.trim();
   const password = $("password").value;
 
-  if (!username || !email || !password) {
-    return setStatus("Fill in username, email, and password.", "error");
-  }
-
-  setStatus("Creating account…");
   const res = await fetch(`${API_BASE}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, email, password }),
   });
   const data = await readJson(res);
-  if (!res.ok) return setStatus(data.error || "Registration failed.", "error");
+  if (!res.ok) {
+    const message = data.error || "Registration failed.";
+    if (res.status === 409 && /username/i.test(message)) setFieldError("username", message);
+    else if (res.status === 409 && /email/i.test(message)) setFieldError("email", message);
+    else setAuthMessage(message);
+    return;
+  }
 
-  setMode("login", { clearStatus: false });
-  setStatus(data.message || "Account created — log in below.", "success");
+  if (data.confirmation_required) {
+    $("check-email-address").textContent = email;
+    $("auth-form-wrap").hidden = true;
+    $("auth-tagline").hidden = true;
+    $("check-email").hidden = false;
+    return;
+  }
+
+  // No email confirmation needed: carry straight on into the app.
+  await login({ fromRegister: true });
 }
 
-async function login() {
+async function login(opts = {}) {
   const email = $("email").value.trim();
   const password = $("password").value;
 
-  if (!email || !password) {
-    return setStatus("Enter your email and password.", "error");
-  }
-
-  setStatus("Signing in…");
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
   const data = await readJson(res);
-  if (!res.ok) return setStatus(data.error || "Login failed.", "error");
+  if (!res.ok) {
+    if (opts.fromRegister) {
+      setMode("login", { keepMessage: { text: "Your account was created. Log in to continue.", kind: "success" } });
+    } else {
+      setAuthMessage(data.error || "Login failed.");
+    }
+    return;
+  }
 
   $("password").value = "";
   await startSession(data);
@@ -194,41 +377,57 @@ async function startSession(data) {
   saveSession();
   applyToken();
 
-  $("auth-panel").classList.add("hidden");
-  $("chat-panel").classList.remove("hidden");
-  setChatStatus("");
-
   if (!currentProfile) {
     // Authenticated, but no profiles row (e.g. an earlier sign-up that failed
     // half-way). Let the user finish instead of being locked out.
-    $("whoami").textContent = "(username not set)";
-    $("profile-setup").classList.remove("hidden");
-    $("chat-main").classList.add("hidden");
+    $("setup-username").value = "";
+    setSetupError("");
+    showView("setup");
+    $("setup-username").focus();
     return;
   }
   showChatHome();
 }
 
 function showChatHome() {
-  $("whoami").textContent = currentProfile.username;
-  $("profile-setup").classList.add("hidden");
-  $("chat-main").classList.remove("hidden");
+  paintAvatar($("me-avatar"), currentProfile.username);
+  $("whoami").textContent = `@${currentProfile.username}`;
+  showView("chat");
+  showList();
   loadConversations();
 }
 
-async function createProfile() {
+function setSetupError(text) {
+  const input = $("setup-username"), msg = $("setup-msg");
+  input.setAttribute("aria-invalid", text ? "true" : "false");
+  msg.classList.toggle("is-error", Boolean(text));
+  msg.textContent = text || "3–30 characters: letters, numbers, _ . or -";
+}
+
+async function createProfile(event) {
+  event.preventDefault();
   const username = $("setup-username").value.trim();
-  if (!username) return setChatStatus("Choose a username.", "error");
-  const res = await apiFetch("/auth/profile", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username }),
-  });
-  if (!res) return;
-  const data = await readJson(res);
-  if (!res.ok) return setChatStatus(data.error || "Could not save username.", "error");
-  currentProfile = data.profile;
-  showChatHome();
+  if (!USERNAME_RE.test(username)) {
+    setSetupError("Use 3–30 letters, numbers, _ . or - (no spaces).");
+    return $("setup-username").focus();
+  }
+  setSetupError("");
+  const btn = $("setup-btn");
+  setBusy(btn, true);
+  try {
+    const res = await apiFetch("/auth/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username }),
+    });
+    if (!res) return;
+    const data = await readJson(res);
+    if (!res.ok) return setSetupError(data.error || "Could not save your username.");
+    currentProfile = data.profile;
+    showChatHome();
+  } finally {
+    setBusy(btn, false);
+  }
 }
 
 function refreshSession() {
@@ -274,14 +473,19 @@ async function apiFetch(path, options = {}) {
   try {
     res = await send();
   } catch {
-    setChatStatus("Network error — check your connection.", "error");
+    // The offline banner already explains a dropped connection; otherwise
+    // tell the user, but not on every poll.
+    if (navigator.onLine !== false && Date.now() - lastNetToast > 8000) {
+      lastNetToast = Date.now();
+      toast("Can't reach Joschat. Check your connection.", "error");
+    }
     return null;
   }
   if (res.status === 401 && await refreshSession()) {
     try { res = await send(); } catch { return null; }
   }
   if (res.status === 401) {
-    signOut("Your session expired — please log in again.");
+    signOut("Your session expired. Log in again to continue.");
     return null;
   }
   return res;
@@ -290,46 +494,51 @@ async function apiFetch(path, options = {}) {
 async function restoreSession() {
   let saved = null;
   try { saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null"); } catch { /* ignore */ }
-  if (!saved || !saved.accessToken) return;
+  if (!saved || !saved.accessToken) return false;
   accessToken = saved.accessToken;
   refreshToken = saved.refreshToken || null;
 
   const res = await apiFetch("/auth/me");
   if (res && res.ok) {
     const data = await res.json();
-    return startSession({ access_token: accessToken, refresh_token: refreshToken, profile: data.profile });
+    await startSession({ access_token: accessToken, refresh_token: refreshToken, profile: data.profile });
+    return true;
   }
   if (res && res.status === 404) {
     const body = await readJson(res);
     if (body.code === "profile_missing") {
-      return startSession({ access_token: accessToken, refresh_token: refreshToken, profile: null });
+      await startSession({ access_token: accessToken, refresh_token: refreshToken, profile: null });
+      return true;
     }
   }
   if (res) signOut();   // (a null res means apiFetch already signed us out)
+  return false;
 }
 
 async function signOut(message) {
   const token = accessToken;
   closeConversation();
   accessToken = refreshToken = currentProfile = null;
+  conversations = null;
   messageStore = [];
   derivedKeys.clear();
+  plainCache.clear();
+  messageStatus.clear();
+  drafts.clear();
   try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
   if (token) {
     // Best effort; the token may already be dead.
     fetch(`${API_BASE}/auth/logout`, { method: "POST", headers: { Authorization: `Bearer ${token}` } })
       .catch(() => {});
   }
-  $("chat-panel").classList.add("hidden");
-  $("auth-panel").classList.remove("hidden");
-  $("conversation-list").innerHTML = "";
-  $("conversation-view").classList.add("hidden");
-  setMode("login", { clearStatus: false });
-  setStatus(typeof message === "string" ? message : "", typeof message === "string" ? "error" : "");
+  $("conversation-list").replaceChildren();
+  $("chat-search").value = "";
+  showView("auth");
+  setMode("login", typeof message === "string" ? { keepMessage: { text: message, kind: "error" } } : {});
 }
 
 // ---------------------------------------------------------------------------
-// Conversations
+// Conversations: list, search, start a chat
 // ---------------------------------------------------------------------------
 
 function conversationLabel(conv) {
@@ -337,50 +546,200 @@ function conversationLabel(conv) {
   return (conv.other_usernames || []).map((n) => `@${n}`).join(", ") || `Conversation ${conv.id}`;
 }
 
-async function loadConversations() {
-  const res = await apiFetch("/conversations");
-  if (!res) return;
-  const data = await readJson(res);
-  if (!res.ok) return setChatStatus(data.error || "Could not load conversations.", "error");
+function conversationAvatarName(conv) {
+  return conv.title || (conv.other_usernames || [])[0] || String(conv.id);
+}
 
-  const list = $("conversation-list");
-  list.innerHTML = "";
-  if (!data.conversations.length) {
-    const li = document.createElement("li");
-    li.className = "conv-empty";
-    li.textContent = "No chats yet — start one with a username above.";
-    list.appendChild(li);
+function hasPassphrase(conversationId) {
+  if (derivedKeys.has(conversationId)) return true;
+  try { return Boolean(sessionStorage.getItem(PASSPHRASE_KEY_PREFIX + conversationId)); } catch { return false; }
+}
+
+function searchQuery() {
+  return $("chat-search").value.trim().replace(/^@/, "");
+}
+
+async function loadConversations() {
+  if (conversations === null) renderConversationList();   // skeleton on first load
+  const res = await apiFetch("/conversations");
+  if (!res) {
+    if (conversations === null) { conversations = []; renderConversationList(); }
     return;
   }
-  for (const conv of data.conversations) {
+  const data = await readJson(res);
+  if (!res.ok) {
+    toast(data.error || "Couldn't load your chats.", "error");
+    if (conversations === null) { conversations = []; renderConversationList(); }
+    return;
+  }
+  conversations = data.conversations;
+  renderConversationList();
+}
+
+function renderConversationList() {
+  const list = $("conversation-list");
+  const empty = $("conv-empty");
+  const newRow = $("new-chat-row");
+  list.replaceChildren();
+
+  if (conversations === null) {
+    for (let i = 0; i < 4; i++) {
+      const row = document.createElement("li");
+      row.className = "skeleton-row";
+      row.setAttribute("aria-hidden", "true");
+      row.innerHTML = '<span class="skeleton hex"></span><span style="flex:1"><span class="skeleton line" style="display:block;width:55%;margin-bottom:.45rem"></span><span class="skeleton line" style="display:block;width:35%"></span></span>';
+      list.appendChild(row);
+    }
+    empty.hidden = true;
+    newRow.hidden = true;
+    return;
+  }
+
+  const raw = searchQuery();
+  const q = raw.toLowerCase();
+  const filtered = q ? conversations.filter((c) => conversationLabel(c).toLowerCase().includes(q)) : conversations;
+
+  for (const conv of filtered) {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "btn-secondary conv-item" + (conv.id === currentConversationId ? " active" : "");
-    btn.textContent = conversationLabel(conv);
-    btn.addEventListener("click", () => openConversation(conv.id, conversationLabel(conv)));
+    btn.className = "conv";
+    if (conv.id === currentConversationId) btn.setAttribute("aria-current", "true");
+
+    const av = document.createElement("span");
+    av.className = "avatar";
+    av.setAttribute("aria-hidden", "true");
+    paintAvatar(av, conversationAvatarName(conv));
+
+    const text = document.createElement("span");
+    text.className = "conv-text";
+    const name = document.createElement("span");
+    name.className = "conv-name";
+    name.textContent = conversationLabel(conv);
+    const sub = document.createElement("span");
+    const unlocked = hasPassphrase(conv.id);
+    sub.className = `conv-sub${unlocked ? "" : " is-locked"}`;
+    sub.appendChild(iconSvg(unlocked ? "unlock" : "lock"));
+    sub.appendChild(document.createTextNode(unlocked ? "Unlocked" : "Enter passphrase to read"));
+    text.append(name, sub);
+
+    btn.append(av, text);
+    btn.addEventListener("click", () => openConversation(conv.id, conversationLabel(conv), conversationAvatarName(conv)));
     li.appendChild(btn);
     list.appendChild(li);
   }
+
+  // "Start a chat with @name" appears when what was typed is a valid username
+  // that doesn't already have a chat.
+  const hasExact = conversations.some((c) => (c.other_usernames || []).some((u) => u.toLowerCase() === q));
+  const isMe = currentProfile && currentProfile.username.toLowerCase() === q;
+  const canStart = Boolean(q) && USERNAME_RE.test(raw) && !hasExact && !isMe;
+  newRow.hidden = !canStart;
+  if (canStart) $("new-chat-label").textContent = `Start a chat with @${raw}`;
+
+  // Empty states point at what to do next.
+  empty.hidden = true;
+  if (!conversations.length && !q) {
+    empty.replaceChildren(...emptyBlock("No chats yet", "Type someone's username in the search box above to start your first chat."));
+    empty.hidden = false;
+  } else if (q && !filtered.length && !canStart) {
+    const why = isMe ? "That's you. Enter someone else's username." : `No chats match “${raw}”. Usernames use letters, numbers, _ . or - only.`;
+    empty.replaceChildren(...emptyBlock("Nothing found", why));
+    empty.hidden = false;
+  }
 }
 
-async function startChat() {
-  const username = $("new-chat-username").value.trim().replace(/^@/, "");
-  if (!username) return setChatStatus("Enter the username of the person you want to chat with.", "error");
-  setChatStatus("");
+function emptyBlock(title, body) {
+  const t = document.createElement("p");
+  t.className = "side-empty-title";
+  t.textContent = title;
+  const b = document.createElement("p");
+  b.textContent = body;
+  return [t, b];
+}
 
-  const res = await apiFetch("/conversations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ participant_usernames: [username] }),
-  });
-  if (!res) return;
-  const data = await readJson(res);
-  if (!res.ok) return setChatStatus(data.error || "Could not start chat.", "error");
+async function startChat(rawName) {
+  const username = String(rawName || "").trim().replace(/^@/, "");
+  if (!USERNAME_RE.test(username)) {
+    return toast("Usernames are 3–30 characters: letters, numbers, _ . or -", "error");
+  }
+  if (currentProfile && username.toLowerCase() === currentProfile.username.toLowerCase()) {
+    return toast("That's your own username. Enter someone else's.", "error");
+  }
 
-  $("new-chat-username").value = "";
-  await loadConversations();
-  openConversation(data.conversation.id, `@${username}`);
+  const row = $("new-chat-row");
+  row.disabled = true;
+  try {
+    const res = await apiFetch("/conversations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ participant_usernames: [username] }),
+    });
+    if (!res) return;
+    const data = await readJson(res);
+    if (!res.ok) return toast(data.error || "Couldn't start that chat.", "error");
+
+    $("chat-search").value = "";
+    $("chat-search-clear").hidden = true;
+    await loadConversations();
+    openConversation(data.conversation.id, `@${username}`, username);
+  } finally {
+    row.disabled = false;
+  }
+}
+
+function onSearchKeydown(event) {
+  if (event.key === "Escape") {
+    event.target.value = "";
+    onSearchInput();
+    return;
+  }
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  const raw = searchQuery();
+  if (!raw) return;
+  const exact = (conversations || []).find((c) => (c.other_usernames || []).some((u) => u.toLowerCase() === raw.toLowerCase()));
+  if (exact) {
+    openConversation(exact.id, conversationLabel(exact), conversationAvatarName(exact));
+    $("chat-search").value = "";
+    onSearchInput();
+  } else {
+    startChat(raw);
+  }
+}
+
+function onSearchInput() {
+  $("chat-search-clear").hidden = !$("chat-search").value;
+  renderConversationList();
+}
+
+// ---------------------------------------------------------------------------
+// Navigation between the list and a conversation (small screens)
+// ---------------------------------------------------------------------------
+
+function showList() {
+  $("chat-shell").dataset.view = "list";
+}
+
+function showThread() {
+  $("chat-shell").dataset.view = "thread";
+  if (isNarrow() && !historyPushed) {
+    history.pushState({ joschat: "thread" }, "");
+    historyPushed = true;
+  }
+}
+
+function leaveThread() {
+  closeConversation();
+  $("thread-view").hidden = true;
+  $("thread-empty").hidden = false;
+  showList();
+  renderConversationList();
+}
+
+function onBackButton() {
+  if (historyPushed) history.back();   // popstate handler does the rest
+  else leaveThread();
 }
 
 // ---------------------------------------------------------------------------
@@ -435,9 +794,8 @@ async function encryptText(plaintext) {
   return bytesToBase64(combined);
 }
 
-async function decryptText(b64) {
-  const key = getConversationKey();
-  if (!key) return null;                       // locked
+// Returns the text, or undefined when the key is wrong / the data is corrupt.
+async function decryptWith(key, b64) {
   try {
     const combined = base64ToBytes(b64);
     const iv = combined.slice(0, 12);
@@ -445,88 +803,216 @@ async function decryptText(b64) {
     const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
     return new TextDecoder().decode(plaintext);
   } catch {
-    return undefined;                          // wrong key / corrupt data
+    return undefined;
   }
 }
 
-async function applyPassphrase() {
+async function ensurePlain(msg, key) {
+  if (plainCache.has(msg.id)) return;
+  plainCache.set(msg.id, await decryptWith(key, msg.encrypted_content));
+}
+
+// --- Unlock panel -----------------------------------------------------------
+
+function setUnlockError(text) {
+  $("unlock-error").textContent = text || "";
+  $("conv-passphrase").setAttribute("aria-invalid", text ? "true" : "false");
+}
+
+function otherName() {
+  return $("conv-title").textContent || "the other person";
+}
+
+function updateLockUI() {
+  const unlocked = derivedKeys.has(currentConversationId);
+  const showPanel = !unlocked || unlockOpen;
+  $("unlock-panel").hidden = !showPanel;
+  $("composer").hidden = showPanel;
+  $("unlock-cancel").hidden = !(unlocked && unlockOpen);
+
+  const changing = unlocked && unlockOpen;
+  $("unlock-title").textContent = changing ? "Change the passphrase" : "This chat is locked";
+  $("unlock-text").textContent = changing
+    ? "Enter the new passphrase you and " + otherName() + " agreed on. Messages written with a different passphrase stay locked."
+    : "Messages are encrypted on your device. Enter the passphrase you and " + otherName() + " agreed on. Share it outside Joschat.";
+  $("unlock-btn").querySelector(".btn-label").textContent = changing ? "Save passphrase" : "Unlock chat";
+
+  const lockBtn = $("lock-btn");
+  lockBtn.dataset.locked = String(!unlocked);
+  setIcon(lockBtn, unlocked ? "unlock" : "lock");
+  const label = unlocked ? "Change passphrase" : "Enter passphrase";
+  lockBtn.setAttribute("aria-label", label);
+  lockBtn.title = label;
+}
+
+async function applyPassphrase(event) {
+  event.preventDefault();
   const passphrase = $("conv-passphrase").value;
-  if (!passphrase) return setChatStatus("Enter the shared passphrase for this chat.", "error");
-  setChatStatus("");
-  derivedKeys.set(currentConversationId, await deriveKey(passphrase, currentConversationId));
-  try { sessionStorage.setItem(PASSPHRASE_KEY_PREFIX + currentConversationId, passphrase); } catch { /* ignore */ }
+  if (!passphrase) return setUnlockError("Enter the passphrase for this chat.");
+  const conversationId = currentConversationId;
+  setUnlockError("");
+
+  const btn = $("unlock-btn");
+  setBusy(btn, true);
+  try {
+    const key = await deriveKey(passphrase, conversationId);
+
+    // If the chat already has messages, make sure this passphrase opens at least
+    // one of them. Otherwise it is almost certainly a typo, and accepting it
+    // would make you send messages the other person can't read.
+    const sample = messageStore.slice(-20);
+    if (sample.length) {
+      let opensSomething = false;
+      for (const m of sample) {
+        if ((await decryptWith(key, m.encrypted_content)) !== undefined) { opensSomething = true; break; }
+      }
+      if (!opensSomething) {
+        return setUnlockError(`That passphrase doesn't open these messages. Check it with ${otherName()} and try again.`);
+      }
+    }
+    if (currentConversationId !== conversationId) return;
+
+    derivedKeys.set(conversationId, key);
+    try { sessionStorage.setItem(PASSPHRASE_KEY_PREFIX + conversationId, passphrase); } catch { /* ignore */ }
+    plainCache.clear();
+    unlockOpen = false;
+    $("conv-passphrase").value = "";
+    updateLockUI();
+    renderConversationList();
+    await renderAllMessages({ forceStick: true });
+    if (canHover()) $("message-text").focus();
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+function onLockButton() {
+  if (derivedKeys.has(currentConversationId)) {
+    unlockOpen = true;
+    updateLockUI();
+  }
+  $("conv-passphrase").focus();
+}
+
+function cancelUnlock() {
+  unlockOpen = false;
+  setUnlockError("");
   $("conv-passphrase").value = "";
-  $("conv-passphrase").placeholder = "Passphrase set — enter a new one to change it";
-  await renderAllMessages();
+  updateLockUI();
 }
 
 // ---------------------------------------------------------------------------
-// Messaging
+// Opening a conversation, live updates
 // ---------------------------------------------------------------------------
 
-async function openConversation(conversationId, label) {
+function renderMessageSkeletons() {
+  const list = $("messages");
+  list.replaceChildren();
+  ["theirs", "mine", "theirs", "mine"].forEach((side, i) => {
+    const li = document.createElement("li");
+    li.className = `skeleton skeleton-msg ${side}`;
+    li.style.width = ["48%", "38%", "60%", "30%"][i];
+    li.setAttribute("aria-hidden", "true");
+    list.appendChild(li);
+  });
+}
+
+async function openConversation(conversationId, label, avatarName) {
+  if (currentConversationId === conversationId && !$("thread-view").hidden) {
+    showThread();
+    return;
+  }
   closeConversation();
   currentConversationId = conversationId;
   messageStore = [];
-  $("messages").innerHTML = "";
-  $("verify-result").textContent = "";
+  plainCache.clear();
+  messageStatus.clear();
+  expandedBlocks.clear();
+  lastRenderedCount = 0;
+  unlockOpen = false;
+  currentParticipants = {};
+
   $("conv-title").textContent = label || `#${conversationId}`;
-  $("conversation-view").classList.remove("hidden");
-  setChatStatus("");
+  paintAvatar($("thread-avatar"), avatarName || label);
+  $("thread-empty").hidden = true;
+  $("thread-view").hidden = false;
+  $("verify-banner").hidden = true;
+  $("jump-btn").hidden = true;
+  $("messages-empty").hidden = true;
+  $("conv-passphrase").value = "";
+  setUnlockError("");
+  $("message-text").value = drafts.get(conversationId) || "";
+  autosizeComposer();
+  updateSendState();
+  setLiveStatus("connecting");
+  renderMessageSkeletons();
+  $("unlock-panel").hidden = true;
+  $("composer").hidden = true;
+  showThread();
+  renderConversationList();   // moves the highlight
 
   // Restore this tab's passphrase for the conversation, if it was entered before.
-  $("conv-passphrase").value = "";
-  $("conv-passphrase").placeholder = "Shared passphrase for this chat";
   let saved = null;
   try { saved = sessionStorage.getItem(PASSPHRASE_KEY_PREFIX + conversationId); } catch { /* ignore */ }
   if (saved && !derivedKeys.has(conversationId)) {
     derivedKeys.set(conversationId, await deriveKey(saved, conversationId));
   }
-  if (derivedKeys.has(conversationId)) {
-    $("conv-passphrase").placeholder = "Passphrase set — enter a new one to change it";
-  }
+  if (currentConversationId !== conversationId) return;
+  updateLockUI();
 
   // Who is in this conversation (for sender names).
-  currentParticipants = {};
   const infoRes = await apiFetch(`/conversations/${conversationId}`);
-  if (!infoRes) return;
+  if (!infoRes || currentConversationId !== conversationId) return;
   if (infoRes.ok) {
     const info = await infoRes.json();
     for (const p of info.participants) currentParticipants[p.user_id] = p.username;
   }
 
   const res = await apiFetch(`/messages/${conversationId}`);
-  if (!res) return;
+  if (!res || currentConversationId !== conversationId) return;
   const data = await readJson(res);
-  if (!res.ok) return setChatStatus(data.error || "Could not load messages.", "error");
-  if (currentConversationId !== conversationId) return;   // user switched chats meanwhile
-
-  await addMessages(data.messages);
-  loadConversations();   // refresh highlight
+  if (!res.ok) {
+    $("messages").replaceChildren();
+    const empty = $("messages-empty");
+    empty.textContent = data.error || "Couldn't load messages. Go back and try again.";
+    empty.hidden = false;
+    return;
+  }
+  await addMessages(data.messages, { forceStick: true, forceRender: true });
 
   subscribeToConversation(conversationId);
   startPolling(conversationId);
+
+  if (canHover()) {
+    if (derivedKeys.has(conversationId)) $("message-text").focus();
+    else $("conv-passphrase").focus();
+  }
 }
 
 function closeConversation() {
+  if (currentConversationId !== null) drafts.set(currentConversationId, $("message-text").value);
   if (realtimeChannel && supabaseClient) supabaseClient.removeChannel(realtimeChannel);
   realtimeChannel = null;
   realtimeConnected = false;
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   currentConversationId = null;
+  clearAttachment();
   setLiveStatus("");
 }
 
-function setLiveStatus(text) {
-  const el = $("live-status");
-  if (el) el.textContent = text;
+const LIVE_TEXT = { live: "Live", connecting: "Connecting…", polling: "Checking for updates" };
+
+function setLiveStatus(state) {
+  const box = $("thread-status");
+  box.dataset.state = state || "connecting";
+  $("live-status").textContent = LIVE_TEXT[state] || "";
 }
 
 function subscribeToConversation(conversationId) {
   const client = ensureSupabaseClient();
   if (!client) {
-    setLiveStatus("· checking for new messages every few seconds");
+    setLiveStatus("polling");
     return;
   }
   applyToken();
@@ -545,7 +1031,7 @@ function subscribeToConversation(conversationId) {
     .subscribe((status) => {
       if (currentConversationId !== conversationId) return;
       realtimeConnected = status === "SUBSCRIBED";
-      setLiveStatus(realtimeConnected ? "· live" : "· reconnecting… (checking every few seconds)");
+      setLiveStatus(realtimeConnected ? "live" : "polling");
     });
 }
 
@@ -553,74 +1039,229 @@ function subscribeToConversation(conversationId) {
 // Realtime channel is not connected, so a working setup makes no extra requests.
 function startPolling(conversationId) {
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
+  pollTimer = setInterval(() => {
     if (realtimeConnected || currentConversationId !== conversationId || document.hidden) return;
-    const res = await apiFetch(`/messages/${conversationId}`);
-    if (!res || !res.ok || currentConversationId !== conversationId) return;
-    const data = await res.json();
-    addMessages(data.messages);
+    refreshMessages();
   }, POLL_INTERVAL_MS);
 }
 
-async function addMessages(messages) {
+async function refreshMessages() {
+  const conversationId = currentConversationId;
+  if (conversationId === null) return;
+  const res = await apiFetch(`/messages/${conversationId}`);
+  if (!res || !res.ok || currentConversationId !== conversationId) return;
+  const data = await res.json();
+  addMessages(data.messages);
+}
+
+// ---------------------------------------------------------------------------
+// Rendering messages
+// ---------------------------------------------------------------------------
+
+async function addMessages(messages, opts = {}) {
   const known = new Set(messageStore.map((m) => m.id));
   const fresh = messages.filter((m) => !known.has(m.id));
-  if (!fresh.length) return;
+  if (!fresh.length && !opts.forceRender) return;
+  if (fresh.length && !opts.forceRender && !verifying) $("verify-banner").hidden = true;
   messageStore.push(...fresh);
   messageStore.sort((a, b) => a.id - b.id);
-  await renderAllMessages();
+  const sentByMe = fresh.some((m) => currentProfile && m.sender_id === currentProfile.id);
+  await renderAllMessages({ forceStick: Boolean(opts.forceStick) || sentByMe });
 }
 
-async function renderAllMessages() {
-  const list = $("messages");
-  list.innerHTML = "";
-  for (const msg of messageStore) list.appendChild(await buildMessageItem(msg));
-  list.scrollTop = list.scrollHeight;
+function scrollToBottom() {
+  const wrap = $("messages-wrap");
+  wrap.scrollTop = wrap.scrollHeight;
 }
 
-async function buildMessageItem(msg) {
-  const plaintext = await decryptText(msg.encrypted_content);
-  const mine = currentProfile && msg.sender_id === currentProfile.id;
+function sameGroup(a, b) {
+  if (!a || !b || a.sender_id !== b.sender_id) return false;
+  const ta = new Date(a.created_at), tb = new Date(b.created_at);
+  return ta.toDateString() === tb.toDateString() && Math.abs(tb - ta) < GROUP_GAP_MS;
+}
 
+function dayLabel(iso) {
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return "Today";
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+  const sameYear = d.getFullYear() === today.getFullYear();
+  return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }) });
+}
+
+function timeLabel(iso) {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+async function renderAllMessages({ forceStick = false } = {}) {
+  const conversationId = currentConversationId;
+  if (conversationId === null) return;
+
+  const key = getConversationKey();
+  if (key) await Promise.all(messageStore.map((m) => ensurePlain(m, key)));
+  if (currentConversationId !== conversationId) return;
+
+  const wrap = $("messages-wrap");
+  const wasNearBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 96;
+  const isFirst = lastRenderedCount === 0;
+  const isGroup = Object.keys(currentParticipants).length > 2;
+
+  const frag = document.createDocumentFragment();
+  messageStore.forEach((msg, i) => {
+    const prev = messageStore[i - 1];
+    const next = messageStore[i + 1];
+    if (!prev || new Date(prev.created_at).toDateString() !== new Date(msg.created_at).toDateString()) {
+      const day = document.createElement("li");
+      day.className = "day";
+      const chip = document.createElement("span");
+      chip.textContent = dayLabel(msg.created_at);
+      day.appendChild(chip);
+      frag.appendChild(day);
+    }
+    frag.appendChild(buildMessageItem(msg, sameGroup(prev, msg), sameGroup(msg, next), isGroup));
+  });
+  $("messages").replaceChildren(frag);
+
+  const empty = $("messages-empty");
+  empty.hidden = messageStore.length > 0;
+  if (!messageStore.length) {
+    empty.textContent = key
+      ? "No messages yet. Your first message starts the chain."
+      : "No messages yet. Enter the passphrase below, then say hello.";
+  }
+
+  const grew = messageStore.length > lastRenderedCount;
+  lastRenderedCount = messageStore.length;
+  if (forceStick || wasNearBottom || isFirst) {
+    scrollToBottom();
+    $("jump-btn").hidden = true;
+  } else if (grew) {
+    $("jump-btn").hidden = false;
+  }
+}
+
+const SEAL_MARKUP =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon class="hex" points="12,2.5 20.5,7.25 20.5,16.75 12,21.5 3.5,16.75 3.5,7.25"/><polyline class="tick" points="8,12.3 11,15 16,9.3"/><path class="bang" d="M12 7.6v5M12 15.9v.01"/></svg>';
+const SEAL_STATE_TEXT = {
+  sealed: "sealed in the chain",
+  verified: "verified",
+  tampered: "failed verification and may have been changed",
+};
+
+function describeSeal(seal, state, blockIndex) {
+  seal.dataset.state = state;
+  seal.setAttribute("aria-label", `Block ${blockIndex}, ${SEAL_STATE_TEXT[state]}. Show details.`);
+}
+
+function buildSeal(msg, expanded) {
+  const seal = document.createElement("button");
+  seal.type = "button";
+  seal.className = "seal";
+  seal.dataset.msgId = msg.id;
+  seal.setAttribute("aria-expanded", String(expanded));
+  seal.innerHTML = SEAL_MARKUP;   // static markup, no user data
+  describeSeal(seal, messageStatus.get(msg.id) || "sealed", msg.block_index);
+  return seal;
+}
+
+function buildMessageItem(msg, contPrev, contNext, isGroup) {
+  const mine = Boolean(currentProfile && msg.sender_id === currentProfile.id);
   const li = document.createElement("li");
-  li.className = mine ? "mine" : "theirs";
+  li.className = `msg ${mine ? "mine" : "theirs"}${contPrev ? " cont-prev" : ""}${contNext ? " cont-next" : ""}`;
+  li.dataset.msgId = msg.id;
 
-  const who = document.createElement("div");
-  who.className = "sender";
-  who.textContent = mine ? "You" : `@${currentParticipants[msg.sender_id] || "unknown"}`;
-  li.appendChild(who);
+  if (!mine && isGroup && !contPrev) {
+    const who = document.createElement("div");
+    who.className = "sender";
+    who.textContent = `@${currentParticipants[msg.sender_id] || "unknown"}`;
+    li.appendChild(who);
+  }
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+
+  const safeUrl = safeHttpsUrl(msg.media_url);
+  if (safeUrl) bubble.appendChild(buildMedia(safeUrl));
 
   // textContent (never innerHTML): decrypted text comes from another user and
   // must not be able to inject markup/script into this page.
-  const body = document.createElement("div");
+  const key = getConversationKey();
+  const plaintext = key ? plainCache.get(msg.id) : null;
   if (plaintext === null) {
-    body.textContent = "🔒 Enter the chat's shared passphrase above to read this message.";
-    body.className = "locked";
+    const locked = document.createElement("div");
+    locked.className = "msg-text is-locked";
+    locked.append(iconSvg("lock"), document.createTextNode("Locked message"));
+    bubble.appendChild(locked);
   } else if (plaintext === undefined) {
-    body.textContent = "[unable to decrypt — the passphrase may not match]";
-    body.className = "locked";
-  } else {
+    const failed = document.createElement("div");
+    failed.className = "msg-text is-failed";
+    failed.append(iconSvg("alert"), document.createTextNode("Can't decrypt. The passphrase may not match."));
+    bubble.appendChild(failed);
+  } else if (!(plaintext === "(attachment)" && safeUrl)) {
+    const body = document.createElement("div");
+    body.className = "msg-text";
     body.textContent = plaintext;
-  }
-  li.appendChild(body);
-
-  const safeUrl = safeHttpsUrl(msg.media_url);
-  if (safeUrl) {
-    const wrap = document.createElement("div");
-    const a = document.createElement("a");
-    a.href = safeUrl;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = "📎 attachment";
-    wrap.appendChild(a);
-    li.appendChild(wrap);
+    bubble.appendChild(body);
   }
 
-  const meta = document.createElement("div");
-  meta.className = "verified";
-  meta.textContent = `block #${msg.block_index} · ${String(msg.block_hash).slice(0, 12)}…`;
-  li.appendChild(meta);
+  const foot = document.createElement("div");
+  foot.className = "msg-foot";
+  const time = document.createElement("time");
+  time.className = "msg-time";
+  time.dateTime = msg.created_at;
+  time.textContent = timeLabel(msg.created_at);
+  foot.append(time, buildSeal(msg, expandedBlocks.has(msg.id)));
+  bubble.appendChild(foot);
+
+  const info = document.createElement("div");
+  info.className = "block-info";
+  info.hidden = !expandedBlocks.has(msg.id);
+  info.append(document.createTextNode(`Block #${msg.block_index}`));
+  const code = document.createElement("code");
+  code.textContent = String(msg.block_hash);
+  info.appendChild(code);
+  bubble.appendChild(info);
+
+  li.appendChild(bubble);
   return li;
+}
+
+function extOf(pathname) {
+  const m = /\.([A-Za-z0-9]+)$/.exec(pathname);
+  return m ? m[1].toLowerCase() : "";
+}
+
+function buildMedia(href) {
+  const url = new URL(href);
+  const ext = extOf(url.pathname);
+  const wrap = document.createElement("div");
+  wrap.className = "media";
+
+  if (IMAGE_EXT.has(ext) || (!ext && url.pathname.includes("/image/upload/"))) {
+    const a = document.createElement("a");
+    a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+    const img = document.createElement("img");
+    img.src = href; img.alt = "Image attachment"; img.loading = "lazy";
+    a.appendChild(img);
+    wrap.appendChild(a);
+  } else if (VIDEO_EXT.has(ext)) {
+    const v = document.createElement("video");
+    v.src = href; v.controls = true; v.preload = "metadata"; v.playsInline = true;
+    wrap.appendChild(v);
+  } else if (AUDIO_EXT.has(ext)) {
+    const a = document.createElement("audio");
+    a.src = href; a.controls = true; a.preload = "none";
+    wrap.appendChild(a);
+  } else {
+    const a = document.createElement("a");
+    a.className = "file-chip";
+    a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.append(iconSvg("file"), document.createTextNode("Open attachment"));
+    wrap.appendChild(a);
+  }
+  return wrap;
 }
 
 function safeHttpsUrl(value) {
@@ -633,34 +1274,92 @@ function safeHttpsUrl(value) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Composer: text, attachments, sending
+// ---------------------------------------------------------------------------
+
+function autosizeComposer() {
+  const ta = $("message-text");
+  ta.style.height = "auto";
+  ta.style.height = `${Math.min(ta.scrollHeight + 2, 160)}px`;
+}
+
+function updateSendState() {
+  const hasContent = $("message-text").value.trim().length > 0 || Boolean(pendingFile);
+  $("send-btn").disabled = sending || !hasContent;
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function setPendingFile(file) {
+  if (!file) return;
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  if (!ALLOWED_EXT.has(ext)) {
+    return toast("That file type isn't supported. Send an image, video or audio file.", "error");
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return toast(`That file is ${formatBytes(file.size)}. The limit is 25 MB.`, "error");
+  }
+  clearAttachment();
+  pendingFile = file;
+  $("attachment-name").textContent = file.name;
+  $("attachment-size").textContent = formatBytes(file.size);
+  const thumb = $("attachment-thumb");
+  if (file.type.startsWith("image/")) {
+    pendingThumbUrl = URL.createObjectURL(file);
+    thumb.src = pendingThumbUrl;
+    thumb.hidden = false;
+    $("attachment-icon").style.display = "none";
+  } else {
+    thumb.hidden = true;
+    $("attachment-icon").style.display = "";
+  }
+  $("attachment-chip").hidden = false;
+  updateSendState();
+}
+
+function clearAttachment() {
+  pendingFile = null;
+  if (pendingThumbUrl) URL.revokeObjectURL(pendingThumbUrl);
+  pendingThumbUrl = null;
+  $("attachment-chip").hidden = true;
+  $("attachment-thumb").hidden = true;
+  $("media-file").value = "";
+  updateSendState();
+}
+
 async function sendMessage() {
-  if (!currentConversationId) return setChatStatus("Open a conversation first.", "error");
-  if (!getConversationKey()) return setChatStatus("Enter the shared passphrase for this chat first.", "error");
+  if (!currentConversationId || sending) return;
+  if (!getConversationKey()) return toast("Unlock this chat with its passphrase first.", "error");
 
-  const text = $("message-text").value;
-  const fileInput = $("media-file");
-  if (!text.trim() && fileInput.files.length === 0) return;
+  const text = $("message-text").value.trim();
+  if (!text && !pendingFile) return;
 
+  sending = true;
   const sendBtn = $("send-btn");
+  sendBtn.classList.add("is-busy");
   sendBtn.disabled = true;
-  setChatStatus("");
   const conversationId = currentConversationId;
 
   try {
     let media_url = null, media_public_id = null;
-    if (fileInput.files.length > 0) {
+    if (pendingFile) {
       const form = new FormData();
-      form.append("file", fileInput.files[0]);
+      form.append("file", pendingFile);
       form.append("conversation_id", conversationId);
       const uploadRes = await apiFetch("/media/upload", { method: "POST", body: form });
       if (!uploadRes) return;
       const uploadData = await readJson(uploadRes);
-      if (!uploadRes.ok) return setChatStatus(`Upload failed: ${uploadData.error}`, "error");
+      if (!uploadRes.ok) return toast(`Upload failed: ${uploadData.error}`, "error");
       media_url = uploadData.secure_url;
       media_public_id = uploadData.public_id;
     }
 
-    const encrypted_content = await encryptText(text.trim() || "(attachment)");
+    const encrypted_content = await encryptText(text || "(attachment)");
 
     const res = await apiFetch("/messages/send", {
       method: "POST",
@@ -674,30 +1373,204 @@ async function sendMessage() {
     });
     if (!res) return;
     const data = await readJson(res);
-    if (!res.ok) return setChatStatus(`Send failed: ${data.error}`, "error");
+    if (!res.ok) return toast(`Message not sent: ${data.error}`, "error");
 
     $("message-text").value = "";
-    fileInput.value = "";
+    drafts.delete(conversationId);
+    autosizeComposer();
+    clearAttachment();
     // Show it immediately; the Realtime/poll copy of the same row is
     // de-duplicated by id, so it never appears twice.
-    if (currentConversationId === conversationId) await addMessages([data.message]);
+    if (currentConversationId === conversationId) await addMessages([data.message], { forceStick: true });
   } finally {
-    sendBtn.disabled = false;
+    sending = false;
+    sendBtn.classList.remove("is-busy");
+    updateSendState();
+    if (canHover()) $("message-text").focus();
   }
 }
 
+// ---------------------------------------------------------------------------
+// Verify: recompute the chain on the server, then sweep the result over the seals
+// ---------------------------------------------------------------------------
+
+function showVerifyBanner(text, bad) {
+  const banner = $("verify-banner");
+  banner.classList.toggle("is-bad", bad);
+  setIcon(banner, bad ? "alert" : "check");
+  $("verify-text").textContent = text;
+  banner.hidden = false;
+}
+
 async function verifyChain() {
-  if (!currentConversationId) return;
-  const res = await apiFetch(`/messages/verify/${currentConversationId}`);
-  if (!res) return;
-  const data = await readJson(res);
-  if (!res.ok) {
-    $("verify-result").textContent = data.error || "Verification failed.";
-    return;
+  if (!currentConversationId || verifying) return;
+  const conversationId = currentConversationId;
+  verifying = true;
+  const btn = $("verify-btn");
+  setBusy(btn, true);
+  btn.querySelector(".btn-label").textContent = "Verifying…";
+  $("verify-banner").hidden = true;
+
+  try {
+    const res = await apiFetch(`/messages/verify/${conversationId}`);
+    if (!res) return;
+    const data = await readJson(res);
+    if (!res.ok) return toast(data.error || "Couldn't verify this chat.", "error");
+    if (currentConversationId !== conversationId) return;
+
+    const outcome = (data.results || []).map((r) => [Number(r.message_id), Boolean(r.verified)]);
+    if (!outcome.length) return showVerifyBanner("Nothing to verify yet. Send a message first.", false);
+
+    // One seal at a time, oldest first. The sweep IS the feedback: it shows
+    // which messages were checked and what each one turned out to be.
+    const step = reduceMotion ? 0 : Math.max(10, Math.min(70, Math.floor(1500 / outcome.length)));
+    let bad = 0;
+    for (const [id, ok] of outcome) {
+      if (currentConversationId !== conversationId) return;
+      messageStatus.set(id, ok ? "verified" : "tampered");
+      if (!ok) bad += 1;
+      const seal = document.querySelector(`#messages .seal[data-msg-id="${id}"]`);
+      if (seal) {
+        describeSeal(seal, ok ? "verified" : "tampered", (messageStore.find((m) => m.id === id) || {}).block_index);
+        if (step) {
+          seal.classList.remove("pop");
+          void seal.offsetWidth;   // restart the animation
+          seal.classList.add("pop");
+        }
+      }
+      if (step) await sleep(step);
+    }
+
+    const total = outcome.length;
+    if (bad === 0) {
+      showVerifyBanner(
+        total === 1 ? "The message is verified. Nothing has been changed." : `All ${total} messages are verified. Nothing has been changed.`,
+        false
+      );
+    } else {
+      showVerifyBanner(
+        `${bad} of ${total} ${total === 1 ? "message" : "messages"} failed verification and may have been changed after sending.`,
+        true
+      );
+    }
+  } finally {
+    verifying = false;
+    setBusy(btn, false);
+    btn.querySelector(".btn-label").textContent = "Verify chat";
   }
-  $("verify-result").textContent = data.all_verified
-    ? "✅ All messages verified — blockchain intact."
-    : "🔴 Tampering detected in one or more messages!";
+}
+
+function onSealClick(event) {
+  const seal = event.target.closest(".seal");
+  if (!seal) return;
+  const info = seal.closest(".bubble").querySelector(".block-info");
+  const open = info.hidden;
+  info.hidden = !open;
+  seal.setAttribute("aria-expanded", String(open));
+  const id = Number(seal.dataset.msgId);
+  if (open) expandedBlocks.add(id); else expandedBlocks.delete(id);
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+function bindEvents() {
+  // Auth
+  $("auth-form").addEventListener("submit", submitAuth);
+  $("tab-login").addEventListener("click", () => setMode("login"));
+  $("tab-register").addEventListener("click", () => setMode("register"));
+  for (const id of ["tab-login", "tab-register"]) {
+    $(id).addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const next = authMode === "login" ? "register" : "login";
+      setMode(next);
+      $(`tab-${next}`).focus();
+    });
+  }
+  $("back-to-login").addEventListener("click", () => setMode("login"));
+  $("toggle-password").addEventListener("click", () => {
+    const pw = $("password");
+    const show = pw.type === "password";
+    pw.type = show ? "text" : "password";
+    const btn = $("toggle-password");
+    btn.setAttribute("aria-pressed", String(show));
+    btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+    setIcon(btn, show ? "eye-off" : "eye");
+  });
+  for (const [key, { input }] of Object.entries(AUTH_FIELDS)) {
+    $(input).addEventListener("input", () => {
+      if ($(input).getAttribute("aria-invalid") === "true") setFieldError(key, "");
+    });
+  }
+  $("setup-form").addEventListener("submit", createProfile);
+  $("setup-username").addEventListener("input", () => {
+    if ($("setup-username").getAttribute("aria-invalid") === "true") setSetupError("");
+  });
+  $("setup-signout").addEventListener("click", () => signOut());
+
+  // Sidebar
+  $("theme-btn").addEventListener("click", toggleTheme);
+  $("signout-btn").addEventListener("click", () => signOut());
+  $("chat-search").addEventListener("input", onSearchInput);
+  $("chat-search").addEventListener("keydown", onSearchKeydown);
+  $("chat-search-clear").addEventListener("click", () => {
+    $("chat-search").value = "";
+    onSearchInput();
+    $("chat-search").focus();
+  });
+  $("new-chat-row").addEventListener("click", () => startChat(searchQuery()));
+
+  // Thread
+  $("back-btn").addEventListener("click", onBackButton);
+  $("verify-btn").addEventListener("click", verifyChain);
+  $("verify-dismiss").addEventListener("click", () => { $("verify-banner").hidden = true; });
+  $("lock-btn").addEventListener("click", onLockButton);
+  $("unlock-panel").addEventListener("submit", applyPassphrase);
+  $("unlock-cancel").addEventListener("click", cancelUnlock);
+  $("messages").addEventListener("click", onSealClick);
+  $("jump-btn").addEventListener("click", () => { scrollToBottom(); $("jump-btn").hidden = true; });
+  $("messages-wrap").addEventListener("scroll", () => {
+    const w = $("messages-wrap");
+    if (w.scrollHeight - w.scrollTop - w.clientHeight < 96) $("jump-btn").hidden = true;
+  }, { passive: true });
+
+  // Composer
+  const ta = $("message-text");
+  ta.addEventListener("input", () => { autosizeComposer(); updateSendState(); });
+  ta.addEventListener("keydown", (e) => {
+    // Desktop: Enter sends, Shift+Enter adds a line. Touch keyboards: Enter adds a line.
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !isTouchKeyboard()) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  ta.addEventListener("paste", (e) => {
+    const file = [...(e.clipboardData ? e.clipboardData.files : [])][0];
+    if (file) { e.preventDefault(); setPendingFile(file); }
+  });
+  $("composer").addEventListener("submit", (e) => { e.preventDefault(); sendMessage(); });
+  $("attach-btn").addEventListener("click", () => $("media-file").click());
+  $("media-file").addEventListener("change", (e) => setPendingFile(e.target.files[0]));
+  $("attachment-remove").addEventListener("click", clearAttachment);
+
+  // Global
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && unlockOpen && derivedKeys.has(currentConversationId)) cancelUnlock();
+  });
+  window.addEventListener("popstate", () => {
+    historyPushed = false;
+    if ($("chat-shell").dataset.view === "thread" && isNarrow()) leaveThread();
+  });
+  window.addEventListener("offline", () => { $("net-banner").hidden = false; });
+  window.addEventListener("online", () => {
+    $("net-banner").hidden = true;
+    if (accessToken) { loadConversations(); refreshMessages(); }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && accessToken && currentConversationId !== null && !realtimeConnected) refreshMessages();
+  });
+  if (navigator.onLine === false) $("net-banner").hidden = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +1669,20 @@ async function listenForIncomingCalls(conversationId, callType = "voice") {
 // ---------------------------------------------------------------------------
 
 (async function init() {
-  await loadPublicConfig();
-  await restoreSession();
+  applyTheme(document.documentElement.dataset.theme || "dark");
+  bindEvents();
+  setMode("login");
+  try {
+    await loadPublicConfig();
+    await restoreSession();
+  } catch (err) {
+    console.error(err);
+  } finally {
+    // Nothing restored: show the login form.
+    if ($("auth-view").hidden && $("setup-view").hidden && $("chat-shell").hidden) {
+      showView("auth");
+      if (canHover()) $("email").focus();
+    }
+    $("boot").hidden = true;
+  }
 })();

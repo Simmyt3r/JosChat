@@ -1,4 +1,4 @@
-const CACHE_NAME = "joschat-cache-v3";
+const CACHE_NAME = "joschat-cache-v4";
 const OFFLINE_URLS = [
   "/",
   "/static/js/app.js",
