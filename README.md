@@ -283,6 +283,21 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   policies still apply to anything the browser touches directly
   (Realtime), but Flask itself is the trust boundary — keep your
   `POSTGRES_*` credentials as secret as you would a service-role key.
+- **What the browser can do to the database**: the browser holds the public
+  Supabase key, so whatever the `anon` and `authenticated` roles may do, any
+  visitor or registered user can do directly, skipping Flask. `schema.sql`
+  therefore gives them the minimum: no INSERT/UPDATE/DELETE on any table (so a
+  user cannot edit their own `role`, or write messages that skip the hash
+  chain), read-only access to their **own** conversations, messages, blocks and
+  calls (blocks name the sender and conversation, so they are not public), and
+  only `id`, `username` and `public_key` from profiles (never phone numbers).
+  Anonymous visitors get nothing. Membership is checked by
+  `private.is_conversation_member()`, a `SECURITY DEFINER` helper in a schema
+  PostgREST does not expose; a policy that queried its own table instead
+  recursed forever, which also stopped Realtime from delivering messages.
+  `tests/test_browser_access.py` checks all of this by acting as those roles.
+  After adding a table, re-run `schema.sql` so it is locked down the same way
+  (Supabase grants new tables to the browser roles by default).
 - **Calling is a sketch**: `startCall()` / `listenForIncomingCalls()` in
   `static/js/app.js` are not wired to any button and are missing pieces (no
   `ontrack` handler to play remote media, no "ringing" handshake). The

@@ -295,85 +295,97 @@ alter table messages enable row level security;
 alter table blocks enable row level security;
 alter table calls enable row level security;
 
--- Profiles: anyone authenticated can read basic profile info; a user can
--- only update their own row; admins can read/update everything via the
--- Flask backend using the service-role key (which bypasses RLS entirely).
+-- ----------------------------------------------------------------------------
+-- Who may do what, from the BROWSER (the `anon` and `authenticated` roles).
+--
+-- The Flask backend is the only writer: it connects as `postgres` (the table
+-- owner), so it bypasses these policies. The browser never queries tables
+-- directly; the one thing it needs is READ access to `messages` so Supabase
+-- Realtime can push new messages live. So browser roles get:
+--
+--   * no INSERT / UPDATE / DELETE on anything. Without this, any logged-in user
+--     could PATCH their own profile to role = 'admin', or write message and
+--     call rows that skip the blockchain.
+--   * read-only, membership-scoped SELECT on conversations, participants,
+--     messages, blocks and calls (you see your own conversations only).
+--   * profiles: only id, username and public_key are readable, never the phone
+--     number.
+--   * nothing at all for `anon`.
+-- ----------------------------------------------------------------------------
+
+-- Membership check used by the policies below. A policy on conversation_participants
+-- that queries conversation_participants recurses forever ("infinite recursion
+-- detected in policy"), which also stops Realtime from delivering messages. A
+-- SECURITY DEFINER function reads the table as its owner, so it does not recurse.
+-- It lives in a schema PostgREST does not expose, so it is not callable as an RPC.
+create schema if not exists private;
+revoke all on schema private from public, anon;
+grant usage on schema private to authenticated;
+
+create or replace function private.is_conversation_member(p_conversation_id bigint)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    select exists (
+        select 1 from public.conversation_participants cp
+        where cp.conversation_id = p_conversation_id
+          and cp.user_id = auth.uid()
+    );
+$$;
+revoke all on function private.is_conversation_member(bigint) from public, anon;
+grant execute on function private.is_conversation_member(bigint) to authenticated;
+
+-- Policies that used to let the browser write (or that recursed) are replaced.
+drop policy if exists "Users can update their own profile" on profiles;
+drop policy if exists "Participants can send messages" on messages;
+drop policy if exists "Call participants can insert their calls" on calls;
+
 drop policy if exists "Profiles are viewable by authenticated users" on profiles;
 create policy "Profiles are viewable by authenticated users"
-    on profiles for select
-    using (auth.role() = 'authenticated');
+    on profiles for select to authenticated
+    using (true);
 
-drop policy if exists "Users can update their own profile" on profiles;
-create policy "Users can update their own profile"
-    on profiles for update
-    using (auth.uid() = id);
-
--- Conversations / participants: only participants can see a conversation.
 drop policy if exists "Participants can view their conversations" on conversations;
 create policy "Participants can view their conversations"
-    on conversations for select
-    using (
-        exists (
-            select 1 from conversation_participants cp
-            where cp.conversation_id = conversations.id
-              and cp.user_id = auth.uid()
-        )
-    );
+    on conversations for select to authenticated
+    using (private.is_conversation_member(id));
 
 drop policy if exists "Participants can view participant lists" on conversation_participants;
 create policy "Participants can view participant lists"
-    on conversation_participants for select
-    using (
-        exists (
-            select 1 from conversation_participants cp2
-            where cp2.conversation_id = conversation_participants.conversation_id
-              and cp2.user_id = auth.uid()
-        )
-    );
+    on conversation_participants for select to authenticated
+    using (private.is_conversation_member(conversation_id));
 
--- Messages: only participants of the conversation can read/insert messages.
 drop policy if exists "Participants can view messages" on messages;
 create policy "Participants can view messages"
-    on messages for select
-    using (
-        exists (
-            select 1 from conversation_participants cp
-            where cp.conversation_id = messages.conversation_id
-              and cp.user_id = auth.uid()
-        )
-    );
+    on messages for select to authenticated
+    using (private.is_conversation_member(conversation_id));
 
-drop policy if exists "Participants can send messages" on messages;
-create policy "Participants can send messages"
-    on messages for insert
-    with check (
-        auth.uid() = sender_id
-        and exists (
-            select 1 from conversation_participants cp
-            where cp.conversation_id = messages.conversation_id
-              and cp.user_id = auth.uid()
-        )
-    );
-
--- Blocks: readable by any authenticated user (needed for independent
--- chain-integrity verification); never writable directly by clients —
--- only the add_block() function (called by the Flask backend with the
--- service-role key) may insert.
+-- Blocks record who sent a message and in which conversation, so they are only
+-- visible to the people in that conversation. Blocks written before those columns
+-- existed (conversation_id is NULL) cannot be attributed and stay backend-only.
+-- Chain verification for everyone else goes through the backend.
 drop policy if exists "Authenticated users can read blocks" on blocks;
-create policy "Authenticated users can read blocks"
-    on blocks for select
-    using (auth.role() = 'authenticated');
+drop policy if exists "Members can read their conversation's blocks" on blocks;
+create policy "Members can read their conversation's blocks"
+    on blocks for select to authenticated
+    using (conversation_id is not null and private.is_conversation_member(conversation_id));
 
--- Calls: participants only.
 drop policy if exists "Call participants can view their calls" on calls;
 create policy "Call participants can view their calls"
-    on calls for select
+    on calls for select to authenticated
     using (auth.uid() = caller_id or auth.uid() = callee_id);
 
-drop policy if exists "Call participants can insert their calls" on calls;
-create policy "Call participants can insert their calls"
-    on calls for insert
-    with check (auth.uid() = caller_id);
+-- Table privileges. RLS decides WHICH rows; these decide whether the browser
+-- may touch a table at all. Supabase grants ALL on new tables to both roles by
+-- default, so take everything back and hand back only what is needed. Re-running
+-- this file after adding a table applies the same rule to it.
+revoke all on all tables in schema public from anon, authenticated;
+revoke all on all sequences in schema public from anon, authenticated;
+grant select on conversations, conversation_participants, messages, blocks, calls to authenticated;
+grant select (id, username, public_key) on profiles to authenticated;
 
 -- ============================================================================
 -- Function privileges
