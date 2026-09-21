@@ -49,6 +49,16 @@ table lock and does the read-and-append in one atomic transaction, so it
 is safe under concurrency. `blockchain.py` is kept as a small, readable,
 directly-runnable reference implementation of the same algorithm.
 
+**What a block contains.** Each block records its `index`, a timestamp, the
+SHA-256 of the *encrypted* message (`message_hash` — never the plaintext), the
+`sender_id` and `conversation_id` of the message, the previous block's hash,
+and its own `block_hash`, computed over all of those with
+`compute_block_hash()` (`sha256(index|created_at|message_hash|sender_id|conversation_id|previous_hash)`).
+Because the sender and conversation are part of the hash, neither can be
+changed afterwards without breaking the chain, and `validate_conversation()`
+also checks that a block names the same sender and conversation as the message
+row it belongs to.
+
 ## Project layout
 
 ```
@@ -95,6 +105,21 @@ JosChat/
 > `add_block`/`validate_chain`/`validate_conversation` are no longer callable by
 > the public `anon`/`authenticated` roles through Supabase's auto-generated
 > `/rest/v1/rpc/...` API.
+
+#### Upgrading an existing database (blocks that don't record sender/conversation yet)
+
+Older versions of `add_block` took only the message hash. The current
+`schema.sql` adds `sender_id` / `conversation_id` to `blocks` and a three-argument
+`add_block(message_hash, sender_id, conversation_id)`. Existing blocks are **not**
+rewritten: they keep empty IDs and keep validating under the original hash
+formula, so a chain can mix old and new blocks. To upgrade without downtime,
+in this order:
+
+1. Run the current `supabase/schema.sql` in the SQL Editor. It is additive, and the
+   old one-argument `add_block(text)` keeps working, so the deployed app is unaffected.
+2. Deploy the new application code (it calls the three-argument `add_block`).
+3. Once the new code is live, remove the old function:
+   `drop function if exists add_block(text);`
 
 ### 2. Get your environment variables
 

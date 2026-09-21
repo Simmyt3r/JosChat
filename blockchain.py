@@ -9,9 +9,16 @@ Why keep a Python copy at all, if Postgres does the real work?
   1. It's directly runnable/testable without a live Supabase project
      (see tests below or `python blockchain.py`), which is useful for
      demonstrating and unit-testing the algorithm in isolation.
-  2. It documents, in plain Python, exactly what the SQL function does,
-     since `digest(index::text || created_at::text || message_hash ||
-     previous_hash, 'sha256')` is otherwise a bit opaque to read cold.
+  2. It documents, in plain Python, exactly what the SQL function does
+     (`compute_block_hash` in the schema), which is otherwise a bit opaque
+     to read cold.
+
+A block records: its index, a timestamp, the SHA-256 of the (already
+encrypted) message, WHO sent it (sender_id), WHICH conversation it belongs to
+(conversation_id), the previous block's hash, and its own hash over all of
+those. Plaintext never appears in a block. Blocks written before sender and
+conversation were recorded have neither, and keep the original, shorter hash
+formula so old history stays valid.
 
 The Flask routes do NOT use this class to persist real messages — they
 run `SELECT * FROM add_block(...)` directly over a Postgres connection
@@ -26,15 +33,25 @@ from datetime import datetime, timezone
 
 
 class Block:
-    def __init__(self, index, timestamp, message_hash, previous_hash, block_hash=None):
+    def __init__(self, index, timestamp, message_hash, previous_hash,
+                 sender_id=None, conversation_id=None, block_hash=None):
         self.index = index
         self.timestamp = timestamp
         self.message_hash = message_hash
+        self.sender_id = sender_id
+        self.conversation_id = conversation_id
         self.previous_hash = previous_hash
         self.block_hash = block_hash or self.compute_hash()
 
     def compute_hash(self):
-        payload = f"{self.index}{self.timestamp}{self.message_hash}{self.previous_hash}"
+        if self.sender_id is None and self.conversation_id is None:
+            # Original format (genesis block, and blocks written before the IDs were recorded).
+            payload = f"{self.index}{self.timestamp}{self.message_hash}{self.previous_hash}"
+        else:
+            payload = "|".join(str(part) for part in (
+                self.index, self.timestamp, self.message_hash,
+                self.sender_id, self.conversation_id, self.previous_hash,
+            ))
         return hashlib.sha256(payload.encode()).hexdigest()
 
     def to_dict(self):
@@ -42,6 +59,8 @@ class Block:
             "index": self.index,
             "timestamp": self.timestamp,
             "message_hash": self.message_hash,
+            "sender_id": self.sender_id,
+            "conversation_id": self.conversation_id,
             "previous_hash": self.previous_hash,
             "block_hash": self.block_hash,
         }
@@ -64,12 +83,16 @@ class Blockchain:
     def last_block(self):
         return self.chain[-1]
 
-    def add_block(self, message_hash: str) -> Block:
+    def add_block(self, message_hash: str, sender_id, conversation_id) -> Block:
+        if sender_id is None or conversation_id is None:
+            raise ValueError("add_block requires both sender_id and conversation_id")
         new_block = Block(
             index=self.last_block.index + 1,
             timestamp=self._now(),
             message_hash=message_hash,
             previous_hash=self.last_block.block_hash,
+            sender_id=sender_id,
+            conversation_id=conversation_id,
         )
         self.chain.append(new_block)
         return new_block
@@ -94,7 +117,7 @@ if __name__ == "__main__":
     # Quick self-test: `python blockchain.py`
     chain = Blockchain()
     for text in ["hello", "how are you?", "meet at 5pm"]:
-        chain.add_block(hash_message(text))
+        chain.add_block(hash_message(text), sender_id="user-1", conversation_id=1)
 
     valid, bad_index = chain.validate_chain()
     print(f"Chain of {len(chain.chain)} blocks valid? {valid}")

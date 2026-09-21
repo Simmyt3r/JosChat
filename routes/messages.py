@@ -76,7 +76,12 @@ def send_message():
         # add_block() in supabase/schema.sql — a single locked
         # transaction, not a read-then-write from Python, so it is safe
         # under concurrent requests.
-        cur.execute("SELECT * FROM add_block(%s)", (message_hash,))
+        # The block records who sent the message and in which conversation, so
+        # that neither can be changed later without breaking the block's hash.
+        cur.execute(
+            "SELECT * FROM add_block(%s, %s::uuid, %s)",
+            (message_hash, g.profile["id"], conversation_id),
+        )
         block = cur.fetchone()
         if not block:
             return jsonify({"error": "Failed to append blockchain block"}), 500

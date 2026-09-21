@@ -45,12 +45,30 @@ create table if not exists conversation_participants (
 -- 3. Blocks — the append-only hash chain (the "blockchain" integrity layer)
 -- ----------------------------------------------------------------------------
 create table if not exists blocks (
-    index          bigint primary key,
-    created_at     timestamptz not null default now(),
-    message_hash   text not null,
-    previous_hash  text not null,
-    block_hash     text not null unique
+    index            bigint primary key,
+    created_at       timestamptz not null default now(),
+    message_hash     text not null,           -- SHA-256 of the ciphertext, never the plaintext
+    sender_id        uuid,                    -- who sent the message  } both NULL only on blocks written
+    conversation_id  bigint,                  -- which conversation    } before these columns existed
+    previous_hash    text not null,
+    block_hash       text not null unique
 );
+
+-- Upgrading a database created before sender_id / conversation_id were recorded.
+-- Existing blocks keep NULLs and keep validating under the original hash formula
+-- (see compute_block_hash below), so history is never rewritten. There are
+-- deliberately no foreign keys: the ledger must survive a deleted conversation
+-- or account, and a cascading delete would tear holes in the chain.
+alter table blocks add column if not exists sender_id uuid;
+alter table blocks add column if not exists conversation_id bigint;
+
+do $$
+begin
+    if not exists (select 1 from pg_constraint where conname = 'blocks_ids_together') then
+        alter table blocks add constraint blocks_ids_together
+            check ((sender_id is null) = (conversation_id is null));
+    end if;
+end $$;
 
 -- ----------------------------------------------------------------------------
 -- 4. Messages
@@ -101,7 +119,44 @@ create table if not exists calls (
 -- another (say Africa/Lagos) hashes differently and validate_chain() reports
 -- tampering that never happened.
 
-create or replace function add_block(p_message_hash text)
+-- The one place the block hash is defined. add_block, validate_chain and
+-- validate_conversation all call it, so they can never disagree.
+--   New blocks:    sha256(index|created_at|message_hash|sender_id|conversation_id|previous_hash)
+--   Older blocks:  sha256(index || created_at || message_hash || previous_hash)
+--                  (no sender/conversation recorded; kept so existing history stays valid)
+create or replace function compute_block_hash(
+    p_index            bigint,
+    p_created_at       timestamptz,
+    p_message_hash     text,
+    p_sender_id        uuid,
+    p_conversation_id  bigint,
+    p_previous_hash    text
+)
+returns text
+language sql
+stable
+set timezone to 'UTC'
+as $$
+    select encode(
+        digest(
+            case
+                when p_sender_id is null and p_conversation_id is null then
+                    p_index::text || p_created_at::text || p_message_hash || p_previous_hash
+                else
+                    p_index::text || '|' || p_created_at::text || '|' || p_message_hash || '|' ||
+                    p_sender_id::text || '|' || p_conversation_id::text || '|' || p_previous_hash
+            end,
+            'sha256'
+        ),
+        'hex'
+    );
+$$;
+
+create or replace function add_block(
+    p_message_hash     text,
+    p_sender_id        uuid,
+    p_conversation_id  bigint
+)
 returns table (
     idx            bigint,
     block_hash     text,
@@ -118,6 +173,10 @@ declare
     v_ts          timestamptz := now();
     v_hash        text;
 begin
+    if p_sender_id is null or p_conversation_id is null then
+        raise exception 'add_block requires both sender_id and conversation_id';
+    end if;
+
     -- Serialize block creation: only one transaction can hold this lock
     -- at a time, so "read last block, then append" is effectively atomic.
     lock table blocks in exclusive mode;
@@ -134,13 +193,12 @@ begin
         v_new_index := v_last_index + 1;
     end if;
 
-    v_hash := encode(
-        digest(v_new_index::text || v_ts::text || p_message_hash || v_last_hash, 'sha256'),
-        'hex'
+    v_hash := compute_block_hash(
+        v_new_index, v_ts, p_message_hash, p_sender_id, p_conversation_id, v_last_hash
     );
 
-    insert into blocks (index, created_at, message_hash, previous_hash, block_hash)
-    values (v_new_index, v_ts, p_message_hash, v_last_hash, v_hash);
+    insert into blocks (index, created_at, message_hash, sender_id, conversation_id, previous_hash, block_hash)
+    values (v_new_index, v_ts, p_message_hash, p_sender_id, p_conversation_id, v_last_hash, v_hash);
 
     return query select v_new_index, v_hash, v_last_hash, v_ts;
 end;
@@ -162,9 +220,9 @@ declare
     v_count        bigint := 0;
 begin
     for rec in select * from blocks order by index asc loop
-        v_computed := encode(
-            digest(rec.index::text || rec.created_at::text || rec.message_hash || rec.previous_hash, 'sha256'),
-            'hex'
+        v_computed := compute_block_hash(
+            rec.index, rec.created_at, rec.message_hash,
+            rec.sender_id, rec.conversation_id, rec.previous_hash
         );
         v_count := v_count + 1;
 
@@ -181,7 +239,9 @@ end;
 $$;
 
 -- Validate only the segment of the chain touched by one conversation.
--- (Cross-checks each message's stored block against a full recomputation.)
+-- Cross-checks each message's stored block against a full recomputation, and
+-- (for blocks that record them) that the block names the same sender and
+-- conversation as the message row it is attached to.
 create or replace function validate_conversation(p_conversation_id bigint)
 returns table (
     message_id  bigint,
@@ -193,19 +253,34 @@ as $$
 declare
     rec         record;
     v_computed  text;
+    v_bound     boolean;
 begin
     for rec in
-        select m.id, m.block_index, m.block_hash, b.message_hash, b.previous_hash, b.created_at
+        select m.id            as msg_id,
+               m.sender_id     as msg_sender_id,
+               m.conversation_id as msg_conversation_id,
+               m.block_index,
+               m.block_hash    as msg_block_hash,
+               b.message_hash,
+               b.sender_id     as blk_sender_id,
+               b.conversation_id as blk_conversation_id,
+               b.previous_hash,
+               b.created_at
         from messages m
         join blocks b on b.index = m.block_index
         where m.conversation_id = p_conversation_id
         order by m.created_at asc
     loop
-        v_computed := encode(
-            digest(rec.block_index::text || rec.created_at::text || rec.message_hash || rec.previous_hash, 'sha256'),
-            'hex'
+        v_computed := compute_block_hash(
+            rec.block_index, rec.created_at, rec.message_hash,
+            rec.blk_sender_id, rec.blk_conversation_id, rec.previous_hash
         );
-        return query select rec.id, (v_computed = rec.block_hash);
+        -- Blocks written before sender/conversation were recorded have NULLs and
+        -- cannot be bound to their message; every newer block must match exactly.
+        v_bound := rec.blk_sender_id is null
+                   or (rec.blk_sender_id = rec.msg_sender_id
+                       and rec.blk_conversation_id = rec.msg_conversation_id);
+        return query select rec.msg_id, (v_computed = rec.msg_block_hash and v_bound);
     end loop;
 end;
 $$;
@@ -309,7 +384,16 @@ create policy "Call participants can insert their calls"
 -- scans the whole table). Only the backend — which connects as `postgres`, the
 -- owner of these functions — should be able to run them.
 -- ============================================================================
-revoke all on function add_block(text) from public, anon, authenticated;
+-- The pre-upgrade one-argument add_block(text) may still exist on a database that
+-- has not yet had it dropped (see README, "Upgrading an existing database").
+do $$
+begin
+    if to_regprocedure('add_block(text)') is not null then
+        revoke all on function add_block(text) from public, anon, authenticated;
+    end if;
+end $$;
+revoke all on function add_block(text, uuid, bigint) from public, anon, authenticated;
+revoke all on function compute_block_hash(bigint, timestamptz, text, uuid, bigint, text) from public, anon, authenticated;
 revoke all on function validate_chain() from public, anon, authenticated;
 revoke all on function validate_conversation(bigint) from public, anon, authenticated;
 
