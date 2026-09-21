@@ -77,3 +77,10 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/joschat_test
         run: pytest -q
+
+      # The browser-side encryption (static/js/crypto.js) also runs under Node, so its
+      # key agreement, tamper detection and validation are tested on every push.
+      - name: Test browser encryption (Node)
+        run: |
+          node --version
+          node --test tests/js/crypto.test.js

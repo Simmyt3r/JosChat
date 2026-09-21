@@ -37,6 +37,7 @@
 
   <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script defer src="/static/js/background.js"></script>
+  <script defer src="/static/js/crypto.js"></script>
   <script defer src="/static/js/app.js"></script>
 </head>
 <body>
@@ -59,6 +60,7 @@
       <symbol id="i-check" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></symbol>
       <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12.5"/><line x1="12" y1="16" x2="12.01" y2="16"/></symbol>
       <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><polyline points="14 3 14 8 19 8"/></symbol>
+      <symbol id="i-key" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
       <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></symbol>
       <symbol id="i-arrow-down" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></symbol>
@@ -189,6 +191,10 @@
         <button type="button" class="icon-btn" id="theme-btn" aria-label="Switch to light theme" title="Switch theme">
           <svg class="icon" aria-hidden="true"><use href="#i-sun" /></svg>
         </button>
+        <button type="button" class="icon-btn has-dot" id="security-btn" aria-label="Security and keys" title="Security and keys">
+          <svg class="icon" aria-hidden="true"><use href="#i-key" /></svg>
+          <span class="attention-dot" id="security-dot" hidden></span>
+        </button>
         <button type="button" class="icon-btn" id="signout-btn" aria-label="Sign out" title="Sign out">
           <svg class="icon" aria-hidden="true"><use href="#i-logout" /></svg>
         </button>
@@ -270,6 +276,27 @@
           </button>
         </div>
 
+        <!-- Shown when a chat uses secure keys but they are not usable, or when the details are opened -->
+        <section id="keys-panel" class="unlock-panel keys-panel" hidden aria-live="polite">
+          <div class="unlock-head">
+            <svg class="icon" id="keys-icon" aria-hidden="true"><use href="#i-key" /></svg>
+            <div>
+              <p class="unlock-title" id="keys-title"></p>
+              <p class="unlock-text" id="keys-text"></p>
+            </div>
+          </div>
+          <div class="safety" id="keys-safety-wrap" hidden>
+            <span class="safety-label" id="keys-safety-label">Safety number</span>
+            <code class="safety-number" id="keys-safety"></code>
+          </div>
+          <div class="keys-actions">
+            <button type="button" class="btn btn-primary" id="keys-primary-btn" hidden></button>
+            <button type="button" class="btn btn-secondary" id="keys-older-btn" hidden>Read older messages</button>
+            <button type="button" class="btn btn-ghost" id="keys-secondary-btn" hidden>Use a shared passphrase instead</button>
+            <button type="button" class="btn btn-ghost" id="keys-close-btn" hidden>Close</button>
+          </div>
+        </section>
+
         <!-- Shown until the chat is unlocked with the shared passphrase -->
         <form id="unlock-panel" class="unlock-panel" novalidate hidden>
           <div class="unlock-head">
@@ -288,6 +315,7 @@
             </button>
             <button type="button" class="btn btn-ghost" id="unlock-cancel" hidden>Cancel</button>
           </div>
+          <button type="button" class="link-btn" id="use-keys-btn" hidden>Use secure keys instead of a passphrase</button>
           <p class="field-msg is-error" id="unlock-error" role="alert"></p>
         </form>
 
@@ -318,6 +346,22 @@
       </div>
     </section>
   </div>
+
+  <dialog id="security-dialog" class="dialog" aria-labelledby="security-title">
+    <h2 id="security-title">Security and keys</h2>
+    <p class="dialog-lead" id="security-status"></p>
+    <div class="safety" id="security-fingerprint-wrap" hidden>
+      <span class="safety-label">Your key fingerprint</span>
+      <code class="safety-number" id="security-fingerprint"></code>
+    </div>
+    <p class="dialog-note" id="security-note"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-primary" id="security-replace-btn" hidden>
+        <span class="spinner" aria-hidden="true"></span><span class="btn-label">Set up keys on this device</span>
+      </button>
+      <button type="button" class="btn btn-secondary" id="security-close">Close</button>
+    </div>
+  </dialog>
 
   <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
 

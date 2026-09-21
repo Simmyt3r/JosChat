@@ -13,16 +13,19 @@
  *   6. A sketch of WebRTC call signalling over a Supabase Realtime Broadcast
  *      channel (NOT wired into the UI — see the bottom of this file).
  *
- * ENCRYPTION NOTE: this is a demo scheme, NOT a full public-key E2EE
- * handshake. Each conversation is encrypted with an AES-GCM key derived
- * (PBKDF2) from a passphrase that the participants agree on out-of-band and
- * type in on their own devices. The server only ever sees ciphertext. A
- * production build should perform proper key exchange using each user's
- * `public_key` column in `profiles` (e.g. X25519 + HKDF, mirroring the
- * Signal Protocol's design) before this is trusted with anything sensitive.
- *
- * The passphrase (and the login session) live in sessionStorage: they survive
- * a page reload but are wiped when the tab is closed.
+ * ENCRYPTION: two schemes live side by side; each message says which one sealed it.
+ *   - Secure keys (default for direct chats where both people have keys): every
+ *     account has an ECDH P-256 key pair made in the browser (see crypto.js). The
+ *     private key never leaves the device; only the public key is sent to the
+ *     server. Two people derive the same AES-GCM key from their own private key
+ *     and the other's public key. Messages are marked "e2." and are bound to their
+ *     conversation and sender. Safety numbers let people confirm no key was swapped,
+ *     and the app asks before trusting a contact's changed key.
+ *   - Shared passphrase (older chats, group chats, contacts without keys): AES-GCM
+ *     with a key derived (PBKDF2) from a passphrase the participants agree on
+ *     out-of-band. The passphrase and login session live in sessionStorage: they
+ *     survive a reload but are wiped when the tab is closed.
+ * In both cases the server only ever sees ciphertext.
  *
  * UI NOTES
  *   - Every message shows a hexagonal "seal". Pressing "Verify chat" asks the
@@ -34,6 +37,9 @@ const API_BASE = "/api";
 const SESSION_KEY = "joschat_session";
 const PASSPHRASE_KEY_PREFIX = "joschat_pass_";
 const THEME_KEY = "joschat_theme";
+const MODE_PREFIX = "joschat_mode_";           // per conversation: "keys" | "passphrase"
+const PEERKEYS_PREFIX = "joschat_peerkeys_";   // per contact: public keys this device has accepted, newest first
+const JC = window.JoschatCrypto;
 const POLL_INTERVAL_MS = 4000;
 
 // Mirrors the server: 25 MB ceiling and the same allowed extensions.
@@ -69,6 +75,13 @@ const expandedBlocks = new Set(); // messageIds whose block details are open
 const drafts = new Map();         // conversationId -> unsent text
 
 let unlockOpen = false;           // passphrase panel open while already unlocked (changing it)
+let myKeys = null;                // { privateKey, publicKey, fingerprint }: this device's key pair, when it matches the server's copy
+let myKeyStatus = "unknown";      // "ready" | "missing" (the key lives in another browser) | "error" | "unsupported"
+let keysReady = Promise.resolve();
+let participantKeys = {};         // user_id -> public key (base64) for the open conversation
+let keyInfo = null;               // secure-key state of the open conversation (see computeKeyState)
+let convMode = "passphrase";      // how NEW messages in the open conversation are encrypted: "keys" | "passphrase"
+let keysPanelOpen = false;        // the "secured with your keys" details are showing
 let pendingFile = null;
 let pendingThumbUrl = null;
 let sending = false;
@@ -302,10 +315,17 @@ async function register() {
   const email = $("email").value.trim();
   const password = $("password").value;
 
+  // Create this account's encryption key pair here, in the browser. Only the PUBLIC
+  // half is sent; the private key is non-extractable and never leaves this device.
+  let keyPair = null;
+  if (JC && JC.supported && JC.KeyStore.available()) {
+    try { keyPair = await JC.generateKeyPair(); } catch (err) { console.warn("Could not create encryption keys", err); }
+  }
+
   const res = await fetch(`${API_BASE}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, email, password }),
+    body: JSON.stringify({ username, email, password, public_key: keyPair ? keyPair.publicKey : undefined }),
   });
   const data = await readJson(res);
   if (!res.ok) {
@@ -314,6 +334,12 @@ async function register() {
     else if (res.status === 409 && /email/i.test(message)) setFieldError("email", message);
     else setAuthMessage(message);
     return;
+  }
+
+  // The account now holds this public key, so keep the matching private key on this
+  // device straight away, even if the person only logs in later after confirming email.
+  if (keyPair) {
+    try { await JC.KeyStore.save(keyPair); } catch (err) { console.error("Could not store the private key", err); }
   }
 
   if (data.confirmation_required) {
@@ -394,6 +420,7 @@ function showChatHome() {
   $("whoami").textContent = `@${currentProfile.username}`;
   showView("chat");
   showList();
+  keysReady = initMyKeys();
   loadConversations();
 }
 
@@ -521,6 +548,11 @@ async function signOut(message) {
   accessToken = refreshToken = currentProfile = null;
   conversations = null;
   messageStore = [];
+  myKeys = null;
+  myKeyStatus = "unknown";
+  keyInfo = null;
+  participantKeys = {};
+  keysPanelOpen = false;
   derivedKeys.clear();
   plainCache.clear();
   messageStatus.clear();
@@ -553,6 +585,17 @@ function conversationAvatarName(conv) {
 function hasPassphrase(conversationId) {
   if (derivedKeys.has(conversationId)) return true;
   try { return Boolean(sessionStorage.getItem(PASSPHRASE_KEY_PREFIX + conversationId)); } catch { return false; }
+}
+
+function conversationSubline(conv) {
+  const mode = conv.id === currentConversationId ? convMode : storageGet(MODE_PREFIX + conv.id);
+  if (mode === "keys") {
+    // For the open chat we know whether the keys can actually be used right now.
+    const usable = conv.id !== currentConversationId || (keyInfo && keyInfo.state === "ready");
+    return usable ? { icon: "key", text: "Secured with keys" } : { icon: "key", text: "Keys needed" };
+  }
+  if (hasPassphrase(conv.id)) return { icon: "unlock", text: "Unlocked" };
+  return { icon: "lock", text: "Encrypted" };
 }
 
 function searchQuery() {
@@ -617,10 +660,10 @@ function renderConversationList() {
     name.className = "conv-name";
     name.textContent = conversationLabel(conv);
     const sub = document.createElement("span");
-    const unlocked = hasPassphrase(conv.id);
-    sub.className = `conv-sub${unlocked ? "" : " is-locked"}`;
-    sub.appendChild(iconSvg(unlocked ? "unlock" : "lock"));
-    sub.appendChild(document.createTextNode(unlocked ? "Unlocked" : "Enter passphrase to read"));
+    const line = conversationSubline(conv);
+    sub.className = "conv-sub";
+    sub.appendChild(iconSvg(line.icon));
+    sub.appendChild(document.createTextNode(line.text));
     text.append(name, sub);
 
     btn.append(av, text);
@@ -743,7 +786,7 @@ function onBackButton() {
 }
 
 // ---------------------------------------------------------------------------
-// Encryption (demo scheme — see the module docstring)
+// Passphrase encryption (the older scheme; secure keys live in crypto.js)
 // ---------------------------------------------------------------------------
 
 function bytesToBase64(bytes) {
@@ -807,9 +850,273 @@ async function decryptWith(key, b64) {
   }
 }
 
-async function ensurePlain(msg, key) {
+// Decrypts one message with whichever scheme wrote it. Nothing is cached while the
+// needed key is missing (the bubble then shows as locked); a failed decrypt is cached
+// as undefined. Older passphrase messages have no marker, secure-key messages start "e2.".
+async function ensurePlain(msg) {
   if (plainCache.has(msg.id)) return;
-  plainCache.set(msg.id, await decryptWith(key, msg.encrypted_content));
+  if (JC.isV2(msg.encrypted_content)) {
+    const keys = keyInfo ? keyInfo.decryptKeys : [];
+    if (!keys.length) return;
+    // A contact who changed keys leaves older messages sealed under their previous key.
+    for (const key of keys) {
+      const text = await JC.decrypt(key, msg.encrypted_content, msg.conversation_id, msg.sender_id);
+      if (text !== undefined) { plainCache.set(msg.id, text); return; }
+    }
+    plainCache.set(msg.id, undefined);
+  } else {
+    const key = getConversationKey();
+    if (!key) return;
+    plainCache.set(msg.id, await decryptWith(key, msg.encrypted_content));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Secure keys: your key pair, your contacts' keys, and which scheme a chat uses
+// ---------------------------------------------------------------------------
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* ignore */ }
+}
+
+// Finds this device's key pair, or creates and publishes one for an account that has none.
+async function initMyKeys() {
+  myKeys = null;
+  if (!JC || !JC.supported || !JC.KeyStore.available()) {
+    myKeyStatus = "unsupported";
+    return updateSecurityUI();
+  }
+  try {
+    const serverKey = currentProfile.public_key;
+    if (serverKey) {
+      const fingerprint = await JC.fingerprintOf(serverKey);
+      const saved = await JC.KeyStore.load(fingerprint);
+      if (saved) {
+        myKeys = { privateKey: saved.privateKey, publicKey: saved.publicKey, fingerprint };
+        myKeyStatus = "ready";
+      } else {
+        myKeyStatus = "missing";      // the key was made in another browser
+      }
+    } else {
+      await createAndPublishKey();    // an account from before keys existed
+    }
+  } catch (err) {
+    console.error("Could not set up encryption keys", err);
+    myKeyStatus = err && err.code === "server" ? "error" : "unsupported";
+  }
+  updateSecurityUI();
+}
+
+async function createAndPublishKey() {
+  const pair = await JC.generateKeyPair();
+  await JC.KeyStore.save(pair);          // keep the private key on this device first
+  const res = await apiFetch("/auth/public-key", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ public_key: pair.publicKey }),
+  });
+  const data = res ? await readJson(res) : null;
+  if (!res || !res.ok) {
+    try { await JC.KeyStore.remove(pair.fingerprint); } catch { /* ignore */ }
+    const failure = new Error((data && data.error) || "Joschat did not accept the new key");
+    failure.code = "server";
+    throw failure;
+  }
+  currentProfile = data.profile;
+  myKeys = { privateKey: pair.privateKey, publicKey: pair.publicKey, fingerprint: pair.fingerprint };
+  myKeyStatus = "ready";
+  plainCache.clear();
+}
+
+function peerKeysStorageKey(peerId) {
+  return `${PEERKEYS_PREFIX}${currentProfile.id}_${peerId}`;
+}
+
+function peerKeyHistory(peerId) {
+  try {
+    const list = JSON.parse(storageGet(peerKeysStorageKey(peerId)) || "[]");
+    return Array.isArray(list) ? list.filter((k) => typeof k === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePeerKeyHistory(peerId, list) {
+  storageSet(peerKeysStorageKey(peerId), JSON.stringify(list.slice(0, 5)));
+}
+
+/**
+ * Works out what secure keys can do for the open conversation.
+ *   ready            both people have keys; `key` seals new messages
+ *   peer-no-key      the other person has not set up keys yet
+ *   peer-key-changed their key is not the one this device accepted: ask first
+ *   peer-key-invalid the key the server holds for them is not a valid key
+ *   no-local-key     your key exists, but in another browser
+ *   group            keys are for one-to-one chats; groups use a passphrase
+ *   unsupported      this browser cannot keep keys (or setup failed)
+ * `decryptKeys` holds every key that may open existing messages, newest first.
+ */
+async function computeKeyState() {
+  const info = { state: "unsupported", key: null, decryptKeys: [], peerId: null,
+                 peerFingerprint: null, newFingerprint: null, safety: null, newSafety: null };
+  const ids = Object.keys(currentParticipants);
+  if (ids.length !== 2) return { ...info, state: "group" };
+  if (myKeyStatus === "missing") return { ...info, state: "no-local-key" };
+  if (myKeyStatus !== "ready") return info;
+
+  const peerId = ids.find((id) => id !== currentProfile.id);
+  info.peerId = peerId;
+  const peerKey = participantKeys[peerId];
+  if (!peerKey) return { ...info, state: "peer-no-key" };
+
+  try {
+    const conversationId = currentConversationId;
+    let history = peerKeyHistory(peerId);
+    if (!history.length) {              // first contact: trust on first use
+      history = [peerKey];
+      savePeerKeyHistory(peerId, history);
+    }
+    const derive = async (publicKey) => JC.deriveConversationKey({
+      privateKey: myKeys.privateKey, peerPublicKey: publicKey, ownFingerprint: myKeys.fingerprint,
+      peerFingerprint: await JC.fingerprintOf(publicKey), conversationId,
+    });
+    info.decryptKeys = await Promise.all(history.map(derive));
+
+    if (history[0] !== peerKey) {
+      info.state = "peer-key-changed";
+      info.peerFingerprint = await JC.fingerprintOf(history[0]);
+      info.newFingerprint = await JC.fingerprintOf(peerKey);
+      info.newSafety = await JC.safetyNumber(myKeys.fingerprint, info.newFingerprint);
+      return info;                      // the new key is NOT used until it is accepted
+    }
+    info.key = info.decryptKeys[0];
+    info.peerFingerprint = await JC.fingerprintOf(peerKey);
+    info.safety = await JC.safetyNumber(myKeys.fingerprint, info.peerFingerprint);
+    info.state = "ready";
+    return info;
+  } catch (err) {
+    console.error("Secure keys unavailable for this chat", err);
+    return { ...info, state: "peer-key-invalid" };
+  }
+}
+
+async function acceptNewPeerKey() {
+  const peerId = keyInfo && keyInfo.peerId;
+  const peerKey = peerId && participantKeys[peerId];
+  if (!peerKey) return;
+  savePeerKeyHistory(peerId, [peerKey, ...peerKeyHistory(peerId).filter((k) => k !== peerKey)]);
+  keyInfo = await computeKeyState();
+  plainCache.clear();
+  updateLockUI();
+  await renderAllMessages();
+}
+
+// Which scheme seals NEW messages in a chat. An explicit choice on this device wins.
+// Otherwise: a chat that already contains secure-key messages follows them (so a device
+// missing the key is told so, instead of being asked for a passphrase that won't help);
+// a chat with only passphrase history keeps its passphrase; a brand-new chat uses keys
+// when both people have them.
+function chooseMode(messages) {
+  if (keyInfo && keyInfo.state === "group") return "passphrase";
+  const stored = storageGet(MODE_PREFIX + currentConversationId);
+  if (stored === "keys" || stored === "passphrase") return stored;
+  if (messages.some((m) => JC.isV2(m.encrypted_content))) return "keys";
+  const hasOlder = messages.length > 0;
+  return keyInfo && keyInfo.state === "ready" && !hasOlder ? "keys" : "passphrase";
+}
+
+function useMode(mode) {
+  convMode = mode;
+  storageSet(MODE_PREFIX + currentConversationId, mode);
+  unlockOpen = false;
+  keysPanelOpen = false;
+  updateLockUI();
+  renderConversationList();
+  renderAllMessages();
+  if (canHover()) {
+    if (!$("unlock-panel").hidden) $("conv-passphrase").focus();
+    else if (!$("composer").hidden) $("message-text").focus();
+  }
+}
+
+// The key that seals NEW messages in the open conversation, or null when it is not usable.
+function activeSendKey() {
+  if (convMode === "keys") return keyInfo && keyInfo.state === "ready" ? keyInfo.key : null;
+  return derivedKeys.get(currentConversationId) || null;
+}
+
+// --- Account security dialog ---------------------------------------------------
+
+const SECURITY_TEXT = {
+  ready: {
+    lead: "Your secure key is on this device.",
+    note: "Your private key never leaves this browser and can't be read by Joschat or anyone else. If you clear this browser's data or sign in from another device, you'll need to set up keys again.",
+  },
+  missing: {
+    lead: "Your secure key was created in a different browser.",
+    note: "Chats that use secure keys can't be opened here until you set up keys on this device. Doing so replaces your key: your other devices stop working for secure chats until set up again, your contacts are asked to accept your new key, and messages already sent to your old key can't be read on this device.",
+  },
+  error: {
+    lead: "Joschat couldn't save your new key.",
+    note: "Check your connection and try again. You can still use chats with a shared passphrase.",
+  },
+  unsupported: {
+    lead: "This browser can't keep secure keys.",
+    note: "You can still use chats with a shared passphrase.",
+  },
+  unknown: { lead: "Checking your keys…", note: "" },
+};
+
+function updateSecurityUI() {
+  const status = SECURITY_TEXT[myKeyStatus] ? myKeyStatus : "unknown";
+  $("security-dot").hidden = !(status === "missing" || status === "error");
+  $("security-status").textContent = SECURITY_TEXT[status].lead;
+  $("security-note").textContent = SECURITY_TEXT[status].note;
+  $("security-fingerprint-wrap").hidden = status !== "ready";
+  if (status === "ready" && myKeys) $("security-fingerprint").textContent = JC.formatFingerprint(myKeys.fingerprint);
+  const action = $("security-replace-btn");
+  action.hidden = !(status === "missing" || status === "error");
+  action.querySelector(".btn-label").textContent = status === "error" ? "Try again" : "Set up keys on this device";
+}
+
+function openSecurityDialog() {
+  updateSecurityUI();
+  const dialog = $("security-dialog");
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeSecurityDialog() {
+  const dialog = $("security-dialog");
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function setUpKeysOnThisDevice() {
+  const btn = $("security-replace-btn");
+  setBusy(btn, true);
+  try {
+    await createAndPublishKey();
+    updateSecurityUI();
+    toast("Secure keys are set up on this device.", "success");
+    closeSecurityDialog();
+    if (currentConversationId !== null) {
+      keyInfo = await computeKeyState();
+      updateLockUI();
+      await renderAllMessages();
+    }
+  } catch (err) {
+    console.error(err);
+    myKeyStatus = err && err.code === "server" ? "error" : myKeyStatus;
+    updateSecurityUI();
+    toast(err && err.code === "server" ? err.message : "Couldn't set up keys in this browser.", "error");
+  } finally {
+    setBusy(btn, false);
+  }
 }
 
 // --- Unlock panel -----------------------------------------------------------
@@ -823,24 +1130,104 @@ function otherName() {
   return $("conv-title").textContent || "the other person";
 }
 
-function updateLockUI() {
-  const unlocked = derivedKeys.has(currentConversationId);
-  const showPanel = !unlocked || unlockOpen;
-  $("unlock-panel").hidden = !showPanel;
-  $("composer").hidden = showPanel;
-  $("unlock-cancel").hidden = !(unlocked && unlockOpen);
+function keysPanelContent(name) {
+  const state = keyInfo ? keyInfo.state : "unsupported";
+  switch (state) {
+    case "ready":
+      return {
+        title: "Secured with your keys",
+        text: `Only you and ${name} can read these messages, and only on devices that hold your keys. To be sure nobody swapped a key, compare this safety number with ${name} in person or on a call.`,
+        safety: keyInfo.safety, safetyLabel: "Safety number", icon: "key", warning: false,
+      };
+    case "peer-no-key":
+      return {
+        title: `${name} hasn't set up secure keys yet`,
+        text: `They need to log in once on their device. Until then, use a shared passphrase for this chat.`,
+        icon: "key", warning: true,
+      };
+    case "peer-key-changed":
+      return {
+        title: `${name}'s security key changed`,
+        text: `This is normal if ${name} signed in on a new device, but it could also mean someone is interfering. Compare this new safety number with ${name} in person or on a call before you continue. Nothing is sent with the new key until you accept it.`,
+        safety: keyInfo.newSafety, safetyLabel: "New safety number", icon: "alert", warning: true,
+      };
+    case "peer-key-invalid":
+      return { title: `${name}'s key isn't valid`, text: `Secure keys can't be used with this contact right now. Use a shared passphrase instead.`, icon: "alert", warning: true };
+    case "no-local-key":
+      return {
+        title: "This device doesn't have your key",
+        text: `Your secure key was created in a different browser. Set up keys on this device to use secure chats here, or use a shared passphrase.`,
+        icon: "key", warning: true,
+      };
+    default:
+      return { title: "Secure keys aren't available", text: `This browser can't keep secure keys. Use a shared passphrase for this chat.`, icon: "key", warning: true };
+  }
+}
 
-  const changing = unlocked && unlockOpen;
-  $("unlock-title").textContent = changing ? "Change the passphrase" : "This chat is locked";
-  $("unlock-text").textContent = changing
-    ? "Enter the new passphrase you and " + otherName() + " agreed on. Messages written with a different passphrase stay locked."
-    : "Messages are encrypted on your device. Enter the passphrase you and " + otherName() + " agreed on. Share it outside Joschat.";
-  $("unlock-btn").querySelector(".btn-label").textContent = changing ? "Save passphrase" : "Unlock chat";
+function renderKeysPanel() {
+  const name = otherName();
+  const content = keysPanelContent(name);
+  const state = keyInfo ? keyInfo.state : "unsupported";
+  $("keys-panel").classList.toggle("is-warning", content.warning);
+  setIcon($("keys-icon"), content.icon);
+  $("keys-title").textContent = content.title;
+  $("keys-text").textContent = content.text;
+  $("keys-safety-wrap").hidden = !content.safety;
+  if (content.safety) {
+    $("keys-safety").textContent = content.safety;
+    $("keys-safety-label").textContent = content.safetyLabel;
+  }
+  const primary = $("keys-primary-btn");
+  primary.hidden = !(state === "peer-key-changed" || state === "no-local-key");
+  primary.textContent = state === "peer-key-changed" ? "Accept new key" : "Set up keys on this device";
+  const hasOlder = messageStore.some((m) => !JC.isV2(m.encrypted_content));
+  $("keys-older-btn").hidden = !(state === "ready" && hasOlder && !derivedKeys.has(currentConversationId));
+  $("keys-secondary-btn").hidden = state === "group";
+  $("keys-close-btn").hidden = state !== "ready";
+}
+
+// One place decides what the bottom of the thread shows: the message box, the
+// passphrase form, or the secure-keys panel.
+function updateLockUI() {
+  const passphraseUnlocked = derivedKeys.has(currentConversationId);
+  const keysMode = convMode === "keys";
+  const keysUsable = keysMode && keyInfo && keyInfo.state === "ready";
+
+  const showPassphrase = keysMode ? unlockOpen : (!passphraseUnlocked || unlockOpen);
+  const showKeys = keysMode && !showPassphrase && (!keysUsable || keysPanelOpen);
+  $("unlock-panel").hidden = !showPassphrase;
+  $("keys-panel").hidden = !showKeys;
+  $("composer").hidden = showPassphrase || showKeys;
+  if (showKeys) renderKeysPanel();
+
+  const changing = passphraseUnlocked && unlockOpen;
+  $("unlock-cancel").hidden = !(unlockOpen && (passphraseUnlocked || keysMode));
+  if (keysMode) {
+    $("unlock-title").textContent = "Read older messages";
+    $("unlock-text").textContent = "Older messages in this chat were locked with a shared passphrase. Enter it to read them. New messages keep using your secure keys.";
+    $("unlock-btn").querySelector(".btn-label").textContent = "Unlock older messages";
+  } else {
+    $("unlock-title").textContent = changing ? "Change the passphrase" : "This chat is locked";
+    $("unlock-text").textContent = changing
+      ? "Enter the new passphrase you and " + otherName() + " agreed on. Messages written with a different passphrase stay locked."
+      : "Messages are encrypted on your device. Enter the passphrase you and " + otherName() + " agreed on. Share it outside Joschat.";
+    $("unlock-btn").querySelector(".btn-label").textContent = changing ? "Save passphrase" : "Unlock chat";
+  }
+  $("use-keys-btn").hidden = !(!keysMode && keyInfo && keyInfo.state === "ready");
 
   const lockBtn = $("lock-btn");
-  lockBtn.dataset.locked = String(!unlocked);
-  setIcon(lockBtn, unlocked ? "unlock" : "lock");
-  const label = unlocked ? "Change passphrase" : "Enter passphrase";
+  let icon, label, locked;
+  if (keysMode) {
+    icon = keysUsable ? "key" : "lock";
+    label = keysUsable ? "Secured with your keys" : "Secure keys unavailable";
+    locked = !keysUsable;
+  } else {
+    icon = passphraseUnlocked ? "unlock" : "lock";
+    label = passphraseUnlocked ? "Change passphrase" : "Enter passphrase";
+    locked = !passphraseUnlocked;
+  }
+  lockBtn.dataset.locked = String(locked);
+  setIcon(lockBtn, icon);
   lockBtn.setAttribute("aria-label", label);
   lockBtn.title = label;
 }
@@ -860,7 +1247,7 @@ async function applyPassphrase(event) {
     // If the chat already has messages, make sure this passphrase opens at least
     // one of them. Otherwise it is almost certainly a typo, and accepting it
     // would make you send messages the other person can't read.
-    const sample = messageStore.slice(-20);
+    const sample = messageStore.filter((m) => !JC.isV2(m.encrypted_content)).slice(-20);
     if (sample.length) {
       let opensSomething = false;
       for (const m of sample) {
@@ -887,6 +1274,12 @@ async function applyPassphrase(event) {
 }
 
 function onLockButton() {
+  if (convMode === "keys") {
+    keysPanelOpen = true;
+    unlockOpen = false;
+    updateLockUI();
+    return;
+  }
   if (derivedKeys.has(currentConversationId)) {
     unlockOpen = true;
     updateLockUI();
@@ -899,6 +1292,11 @@ function cancelUnlock() {
   setUnlockError("");
   $("conv-passphrase").value = "";
   updateLockUI();
+}
+
+function onKeysPrimary() {
+  if (keyInfo && keyInfo.state === "peer-key-changed") acceptNewPeerKey();
+  else openSecurityDialog();
 }
 
 // ---------------------------------------------------------------------------
@@ -930,7 +1328,11 @@ async function openConversation(conversationId, label, avatarName) {
   expandedBlocks.clear();
   lastRenderedCount = 0;
   unlockOpen = false;
+  keysPanelOpen = false;
+  keyInfo = null;
+  convMode = "passphrase";
   currentParticipants = {};
+  participantKeys = {};
 
   $("conv-title").textContent = label || `#${conversationId}`;
   paintAvatar($("thread-avatar"), avatarName || label);
@@ -947,6 +1349,7 @@ async function openConversation(conversationId, label, avatarName) {
   setLiveStatus("connecting");
   renderMessageSkeletons();
   $("unlock-panel").hidden = true;
+  $("keys-panel").hidden = true;
   $("composer").hidden = true;
   showThread();
   renderConversationList();   // moves the highlight
@@ -958,15 +1361,21 @@ async function openConversation(conversationId, label, avatarName) {
     derivedKeys.set(conversationId, await deriveKey(saved, conversationId));
   }
   if (currentConversationId !== conversationId) return;
-  updateLockUI();
 
-  // Who is in this conversation (for sender names).
+  // Who is in this conversation (for sender names, and their public keys).
   const infoRes = await apiFetch(`/conversations/${conversationId}`);
   if (!infoRes || currentConversationId !== conversationId) return;
   if (infoRes.ok) {
     const info = await infoRes.json();
-    for (const p of info.participants) currentParticipants[p.user_id] = p.username;
+    for (const p of info.participants) {
+      currentParticipants[p.user_id] = p.username;
+      if (p.public_key) participantKeys[p.user_id] = p.public_key;
+    }
   }
+  await keysReady;
+  if (currentConversationId !== conversationId) return;
+  keyInfo = await computeKeyState();
+  if (currentConversationId !== conversationId) return;
 
   const res = await apiFetch(`/messages/${conversationId}`);
   if (!res || currentConversationId !== conversationId) return;
@@ -978,14 +1387,18 @@ async function openConversation(conversationId, label, avatarName) {
     empty.hidden = false;
     return;
   }
+  convMode = chooseMode(data.messages);
+  if (convMode === "keys" && !storageGet(MODE_PREFIX + conversationId)) storageSet(MODE_PREFIX + conversationId, "keys");
+  updateLockUI();
+  renderConversationList();
   await addMessages(data.messages, { forceStick: true, forceRender: true });
 
   subscribeToConversation(conversationId);
   startPolling(conversationId);
 
   if (canHover()) {
-    if (derivedKeys.has(conversationId)) $("message-text").focus();
-    else $("conv-passphrase").focus();
+    if (!$("composer").hidden) $("message-text").focus();
+    else if (!$("unlock-panel").hidden) $("conv-passphrase").focus();
   }
 }
 
@@ -997,6 +1410,8 @@ function closeConversation() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   currentConversationId = null;
+  keyInfo = null;
+  keysPanelOpen = false;
   clearAttachment();
   setLiveStatus("");
 }
@@ -1099,8 +1514,7 @@ async function renderAllMessages({ forceStick = false } = {}) {
   const conversationId = currentConversationId;
   if (conversationId === null) return;
 
-  const key = getConversationKey();
-  if (key) await Promise.all(messageStore.map((m) => ensurePlain(m, key)));
+  await Promise.all(messageStore.map((m) => ensurePlain(m)));
   if (currentConversationId !== conversationId) return;
 
   const wrap = $("messages-wrap");
@@ -1127,9 +1541,9 @@ async function renderAllMessages({ forceStick = false } = {}) {
   const empty = $("messages-empty");
   empty.hidden = messageStore.length > 0;
   if (!messageStore.length) {
-    empty.textContent = key
-      ? "No messages yet. Your first message starts the chain."
-      : "No messages yet. Enter the passphrase below, then say hello.";
+    if (activeSendKey()) empty.textContent = "No messages yet. Your first message starts the chain.";
+    else if (convMode === "keys") empty.textContent = "No messages yet. Secure keys aren't ready for this chat. See below.";
+    else empty.textContent = "No messages yet. Enter the passphrase below, then say hello.";
   }
 
   const grew = messageStore.length > lastRenderedCount;
@@ -1187,17 +1601,19 @@ function buildMessageItem(msg, contPrev, contNext, isGroup) {
 
   // textContent (never innerHTML): decrypted text comes from another user and
   // must not be able to inject markup/script into this page.
-  const key = getConversationKey();
-  const plaintext = key ? plainCache.get(msg.id) : null;
+  const sealedWithKeys = JC.isV2(msg.encrypted_content);
+  const plaintext = plainCache.has(msg.id) ? plainCache.get(msg.id) : null;
   if (plaintext === null) {
     const locked = document.createElement("div");
     locked.className = "msg-text is-locked";
-    locked.append(iconSvg("lock"), document.createTextNode("Locked message"));
+    locked.append(iconSvg("lock"), document.createTextNode(sealedWithKeys ? "Locked. Needs secure keys" : "Locked. Needs the passphrase"));
     bubble.appendChild(locked);
   } else if (plaintext === undefined) {
     const failed = document.createElement("div");
     failed.className = "msg-text is-failed";
-    failed.append(iconSvg("alert"), document.createTextNode("Can't decrypt. The passphrase may not match."));
+    failed.append(iconSvg("alert"), document.createTextNode(
+      sealedWithKeys ? "Can't decrypt. It may have been changed or was written for another key." : "Can't decrypt. The passphrase may not match."
+    ));
     bubble.appendChild(failed);
   } else if (!(plaintext === "(attachment)" && safeUrl)) {
     const body = document.createElement("div");
@@ -1334,7 +1750,10 @@ function clearAttachment() {
 
 async function sendMessage() {
   if (!currentConversationId || sending) return;
-  if (!getConversationKey()) return toast("Unlock this chat with its passphrase first.", "error");
+  const sendKey = activeSendKey();
+  if (!sendKey) {
+    return toast(convMode === "keys" ? "Secure keys aren't ready for this chat." : "Unlock this chat with its passphrase first.", "error");
+  }
 
   const text = $("message-text").value.trim();
   if (!text && !pendingFile) return;
@@ -1359,7 +1778,10 @@ async function sendMessage() {
       media_public_id = uploadData.public_id;
     }
 
-    const encrypted_content = await encryptText(text || "(attachment)");
+    // Sealed on this device either way; the server only ever receives ciphertext.
+    const encrypted_content = convMode === "keys"
+      ? await JC.encrypt(sendKey, text || "(attachment)", conversationId, currentProfile.id)
+      : await encryptText(text || "(attachment)");
 
     const res = await apiFetch("/messages/send", {
       method: "POST",
@@ -1526,6 +1948,19 @@ function bindEvents() {
   $("verify-btn").addEventListener("click", verifyChain);
   $("verify-dismiss").addEventListener("click", () => { $("verify-banner").hidden = true; });
   $("lock-btn").addEventListener("click", onLockButton);
+  $("use-keys-btn").addEventListener("click", () => useMode("keys"));
+  $("keys-secondary-btn").addEventListener("click", () => useMode("passphrase"));
+  $("keys-primary-btn").addEventListener("click", onKeysPrimary);
+  $("keys-older-btn").addEventListener("click", () => {
+    keysPanelOpen = false;
+    unlockOpen = true;
+    updateLockUI();
+    $("conv-passphrase").focus();
+  });
+  $("keys-close-btn").addEventListener("click", () => { keysPanelOpen = false; updateLockUI(); });
+  $("security-btn").addEventListener("click", openSecurityDialog);
+  $("security-close").addEventListener("click", closeSecurityDialog);
+  $("security-replace-btn").addEventListener("click", setUpKeysOnThisDevice);
   $("unlock-panel").addEventListener("submit", applyPassphrase);
   $("unlock-cancel").addEventListener("click", cancelUnlock);
   $("messages").addEventListener("click", onSealClick);
@@ -1556,7 +1991,9 @@ function bindEvents() {
 
   // Global
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && unlockOpen && derivedKeys.has(currentConversationId)) cancelUnlock();
+    if (e.key !== "Escape") return;
+    if (unlockOpen && (derivedKeys.has(currentConversationId) || convMode === "keys")) cancelUnlock();
+    else if (keysPanelOpen) { keysPanelOpen = false; updateLockUI(); }
   });
   window.addEventListener("popstate", () => {
     historyPushed = false;

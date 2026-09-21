@@ -161,7 +161,7 @@ def get_conversation(conversation_id):
 
         cur.execute(
             """
-            SELECT cp.user_id, cp.joined_at, p.username
+            SELECT cp.user_id, cp.joined_at, p.username, p.public_key
             FROM conversation_participants cp
             JOIN profiles p ON p.id = cp.user_id
             WHERE cp.conversation_id = %s

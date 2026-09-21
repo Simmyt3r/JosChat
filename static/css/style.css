@@ -564,3 +564,37 @@ body.in-app #bg-canvas { display: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; transition-delay: 0s !important; }
 }
+
+
+/* ---------------------------------------------------------------------
+   Secure keys: panel, safety number, security dialog
+--------------------------------------------------------------------- */
+.has-dot { position: relative; }
+.attention-dot {
+  position: absolute; top: 0.35rem; right: 0.35rem; width: 0.6rem; height: 0.6rem;
+  border-radius: 50%; background: var(--lock); box-shadow: 0 0 0 2px var(--surface);
+}
+
+.keys-panel .unlock-head > .icon { color: var(--seal); }
+.keys-panel.is-warning .unlock-head > .icon { color: var(--lock); }
+.keys-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; max-width: 50rem; margin: 0.75rem auto 0; }
+
+.safety { max-width: 50rem; margin: 0 auto; padding: 0.6rem 0.8rem; background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); }
+.safety-label { display: block; font-size: 0.78rem; font-weight: 500; color: var(--dim); margin-bottom: 0.2rem; }
+.safety-number { display: block; font-family: var(--font-mono); font-size: 1rem; letter-spacing: 0.04em; overflow-wrap: anywhere; color: var(--text); }
+
+.link-btn {
+  display: block; max-width: 50rem; margin: 0.6rem auto 0; padding: 0.25rem 0; background: none; border: 0;
+  color: var(--focus); font-size: 0.9rem; font-weight: 500; text-align: left; text-decoration: underline; text-underline-offset: 3px;
+}
+.unlock-row + .link-btn { margin-top: 0.5rem; }
+
+.dialog {
+  width: min(28rem, calc(100% - 2rem)); padding: 1.5rem; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 1.1rem; box-shadow: var(--shadow);
+}
+.dialog::backdrop { background: rgba(5, 9, 20, 0.6); }
+.dialog h2 { font-family: var(--font-display); font-size: 1.25rem; letter-spacing: -0.01em; margin-bottom: 0.6rem; }
+.dialog-lead { font-weight: 500; margin-bottom: 0.9rem; }
+.dialog-note { font-size: 0.88rem; color: var(--dim); margin: 0.9rem 0 1.1rem; }
+.dialog-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-end; }

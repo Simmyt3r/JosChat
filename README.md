@@ -162,10 +162,13 @@ python app.py
 The app runs at `http://localhost:5000`. Open it in a browser to use the
 demo UI, or hit the JSON API directly (see "API reference" below).
 
-**Using the demo UI:** create an account for each person, log in, type the other
-person's username under *Start a chat*, and both of you enter the same **shared
-passphrase** for that chat (agree on it outside Joschat — messages are encrypted in
-the browser with a key derived from it, and the server never sees it).
+**Using the demo UI:** create an account for each person, log in, and type the other
+person's username in the search box to start a chat. When both people have set up
+their **secure keys** (this happens automatically when an account is created or first
+logs in), the chat is protected with them and no passphrase is needed. Otherwise, or
+for group chats, both of you enter the same **shared passphrase** for that chat (agree
+on it outside Joschat). Either way, messages are encrypted in the browser and the
+server never sees a key or the plaintext.
 
 Running against a local, non-TLS Postgres instead of Supabase? Set
 `POSTGRES_SSLMODE=disable` (the default, `require`, is what Supabase needs).
@@ -220,6 +223,7 @@ and Preview, then redeploy.
 | POST | `/api/auth/login` | – | `{email, password}` → `{access_token, refresh_token, profile}` (`profile` is `null` if the account has no profile row yet) |
 | POST | `/api/auth/refresh` | – | `{refresh_token}` → a fresh `{access_token, refresh_token, profile}` |
 | POST | `/api/auth/profile` | Bearer | `{username, phone_number?}` — create the profile row for an account that has none |
+| PUT | `/api/auth/public-key` | Bearer | `{public_key}` — set or replace your own end-to-end encryption public key (base64 of an uncompressed P-256 point; anything else, including a private key, is rejected) |
 | POST | `/api/auth/logout` | Bearer | Invalidate the current session |
 | GET | `/api/auth/me` | Bearer | Current user's profile |
 | POST | `/api/conversations` | Bearer | `{participant_usernames: [...] \| participant_ids: [...], is_group?, title?}` — returns the existing conversation (200) if the pair already has one |
@@ -255,13 +259,21 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
 
 ## Known simplifications (documented, not hidden)
 
-- **Encryption**: `static/js/app.js` encrypts each conversation with an
-  AES-GCM key derived (PBKDF2) from a passphrase the participants agree on
-  out-of-band, kept in `sessionStorage` — rather than a full public-key
-  key-exchange protocol. Security is only as good as that passphrase. The
-  `profiles.public_key` column is provisioned for a real X25519-based E2EE
-  handshake, which is the natural next step before handling real sensitive
-  traffic.
+- **Encryption**: direct chats use public-key end-to-end encryption
+  (`static/js/crypto.js`): each account has an ECDH P-256 key pair created in the
+  browser, the private key is non-extractable and kept in that browser's IndexedDB,
+  and only the public key is sent to the server (and validated there, including an
+  on-curve check, by `utils/keys.py`; a private key is refused). Two people derive an
+  AES-256-GCM key from their own private key and the other's public key (ECDH +
+  HKDF). Messages are marked `e2.` and are bound to their conversation and sender.
+  Older passphrase-encrypted chats, group chats and contacts without keys keep using a
+  shared passphrase (PBKDF2 → AES-GCM); each message is decrypted by the scheme that
+  sealed it. What this does **not** give you: the server distributes public keys, so
+  a malicious server could swap one — compare the *safety number* with your contact
+  (the app also warns when a contact's key changes); there is no forward secrecy
+  (long-lived keys); and keys belong to one browser, so a new device must set up new
+  keys and cannot read messages sealed to the old one. Media files are not yet
+  encrypted.
 - **Blockchain decentralisation**: the chain is a single, private,
   application-layer hash chain hosted by your Supabase project, not a
   multi-node consensus network — see Chapter 2 of the project report for
