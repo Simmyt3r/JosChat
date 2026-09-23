@@ -27,6 +27,7 @@ from utils.auth_helpers import require_auth
 messages_bp = Blueprint("messages", __name__)
 
 MAX_CIPHERTEXT_CHARS = 200_000
+MAX_ENCRYPTED_MEDIA_CHARS = 4_000   # ciphertext of a small JSON blob {url, public_id, ...}, not the file itself
 
 def _cloudinary_prefix() -> str:
     return f"https://res.cloudinary.com/{Config.CLOUDINARY_CLOUD_NAME}/"
@@ -51,6 +52,11 @@ def send_message():
     encrypted_content = data.get("encrypted_content")
     media_url = data.get("media_url")
     media_public_id = data.get("media_public_id")
+    # Ciphertext of {url, public_id, resource_type, format}, sealed client-side with
+    # the same scheme (secure keys or shared passphrase) as encrypted_content, so the
+    # attachment's location isn't sitting in the message row as plain text. The file
+    # itself still lives on Cloudinary unencrypted — see README, "Encrypted media".
+    encrypted_media = data.get("encrypted_media")
 
     if not conversation_id or not encrypted_content:
         return jsonify({"error": "conversation_id and encrypted_content are required"}), 400
@@ -65,6 +71,10 @@ def send_message():
         isinstance(media_url, str) and media_url.startswith(_cloudinary_prefix())
     ):
         return jsonify({"error": "media_url must be a URL returned by /api/media/upload"}), 400
+    if encrypted_media is not None and not (
+        isinstance(encrypted_media, str) and 0 < len(encrypted_media) <= MAX_ENCRYPTED_MEDIA_CHARS
+    ):
+        return jsonify({"error": f"encrypted_media must be a string up to {MAX_ENCRYPTED_MEDIA_CHARS} characters"}), 400
 
     message_hash = hash_message(encrypted_content)
 
@@ -90,13 +100,13 @@ def send_message():
             """
             INSERT INTO messages
                 (conversation_id, sender_id, encrypted_content, media_url,
-                 media_public_id, block_index, block_hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                 media_public_id, encrypted_media, block_index, block_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
                 conversation_id, g.profile["id"], encrypted_content, media_url,
-                media_public_id, block["idx"], block["block_hash"],
+                media_public_id, encrypted_media, block["idx"], block["block_hash"],
             ),
         )
         message = cur.fetchone()

@@ -70,6 +70,7 @@ let conversations = null;         // null = not loaded yet, [] = loaded but empt
 let messageStore = [];            // messages of the open conversation, oldest first
 const derivedKeys = new Map();    // conversationId -> CryptoKey
 const plainCache = new Map();     // messageId -> decrypted text (or undefined if it failed)
+const mediaCache = new Map();     // messageId -> {url, ...} once decrypted+trusted (or undefined if it failed)
 const messageStatus = new Map();  // messageId -> "verified" | "tampered" (session only)
 const expandedBlocks = new Set(); // messageIds whose block details are open
 const drafts = new Map();         // conversationId -> unsent text
@@ -555,6 +556,7 @@ async function signOut(message) {
   keysPanelOpen = false;
   derivedKeys.clear();
   plainCache.clear();
+  mediaCache.clear();
   messageStatus.clear();
   drafts.clear();
   try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
@@ -850,25 +852,81 @@ async function decryptWith(key, b64) {
   }
 }
 
-// Decrypts one message with whichever scheme wrote it. Nothing is cached while the
-// needed key is missing (the bubble then shows as locked); a failed decrypt is cached
-// as undefined. Older passphrase messages have no marker, secure-key messages start "e2.".
-async function ensurePlain(msg) {
-  if (plainCache.has(msg.id)) return;
-  if (JC.isV2(msg.encrypted_content)) {
+// Decrypts one ciphertext field of a message (encrypted_content OR encrypted_media)
+// with whichever scheme sealed it, into `cache`. Nothing is cached while the needed
+// key is missing (the caller then treats the field as still locked); a failed decrypt
+// is cached as undefined so it is not retried every render. Older passphrase messages
+// have no marker; secure-key ciphertext starts "e2." (see crypto.js).
+async function ensureDecrypted(cache, msg, ciphertext) {
+  if (cache.has(msg.id)) return;
+  if (JC.isV2(ciphertext)) {
     const keys = keyInfo ? keyInfo.decryptKeys : [];
     if (!keys.length) return;
     // A contact who changed keys leaves older messages sealed under their previous key.
     for (const key of keys) {
-      const text = await JC.decrypt(key, msg.encrypted_content, msg.conversation_id, msg.sender_id);
-      if (text !== undefined) { plainCache.set(msg.id, text); return; }
+      const text = await JC.decrypt(key, ciphertext, msg.conversation_id, msg.sender_id);
+      if (text !== undefined) { cache.set(msg.id, text); return; }
     }
-    plainCache.set(msg.id, undefined);
+    cache.set(msg.id, undefined);
   } else {
     const key = getConversationKey();
     if (!key) return;
-    plainCache.set(msg.id, await decryptWith(key, msg.encrypted_content));
+    cache.set(msg.id, await decryptWith(key, ciphertext));
   }
+}
+
+async function ensurePlain(msg) {
+  await ensureDecrypted(plainCache, msg, msg.encrypted_content);
+}
+
+// Decrypts an attachment's reference (see "Encrypted media" in the README: the
+// message row carries only ciphertext of {url, public_id, ...}; the file itself is
+// NOT encrypted on Cloudinary). Once decrypted, the URL must also point at this
+// app's own Cloudinary account — the server validated that for legacy plaintext
+// media_url, but cannot for ciphertext it can't read, so the client checks instead.
+async function ensureMedia(msg) {
+  if (!msg.encrypted_media || mediaCache.has(msg.id)) return;
+  await ensureDecrypted(mediaCache, msg, msg.encrypted_media);
+  if (!mediaCache.has(msg.id)) return;             // still locked
+  const raw = mediaCache.get(msg.id);
+  if (raw === undefined) return;                   // failed to decrypt; stays undefined
+  try {
+    const info = JSON.parse(raw);
+    if (typeof info.url !== "string" || !isTrustedMediaUrl(info.url)) throw new Error("untrusted media URL");
+    mediaCache.set(msg.id, info);
+  } catch (err) {
+    console.warn("Rejected an attachment reference", err);
+    mediaCache.set(msg.id, undefined);
+  }
+}
+
+// True only for an https URL under this app's own Cloudinary account. Guards against
+// a participant (or a compromised/malicious contact, since anyone in a chat can send a
+// message) pointing other people's clients at an arbitrary URL to load as "media".
+function isTrustedMediaUrl(href) {
+  const cloud = supabaseConfig && supabaseConfig.cloudinary_cloud_name;
+  if (!cloud) return false;
+  try {
+    const url = new URL(href);
+    return url.protocol === "https:" && url.hostname === "res.cloudinary.com" && url.pathname.startsWith(`/${cloud}/`);
+  } catch {
+    return false;
+  }
+}
+
+// What to show for a message's attachment, if any: an already-known legacy plaintext
+// URL, a decrypted+trusted one, or a locked/failed/none state.
+function resolveMedia(msg) {
+  if (msg.encrypted_media) {
+    if (!mediaCache.has(msg.id)) return { state: "locked" };
+    const info = mediaCache.get(msg.id);
+    return info ? { state: "ready", url: info.url } : { state: "failed" };
+  }
+  if (msg.media_url) {   // a message sent before encrypted_media existed
+    const url = safeHttpsUrl(msg.media_url);
+    return url && isTrustedMediaUrl(url) ? { state: "ready", url } : { state: "failed" };
+  }
+  return { state: "none" };
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,6 +1069,7 @@ async function acceptNewPeerKey() {
   savePeerKeyHistory(peerId, [peerKey, ...peerKeyHistory(peerId).filter((k) => k !== peerKey)]);
   keyInfo = await computeKeyState();
   plainCache.clear();
+  mediaCache.clear();
   updateLockUI();
   await renderAllMessages();
 }
@@ -1106,6 +1165,8 @@ async function setUpKeysOnThisDevice() {
     closeSecurityDialog();
     if (currentConversationId !== null) {
       keyInfo = await computeKeyState();
+      plainCache.clear();
+      mediaCache.clear();
       updateLockUI();
       await renderAllMessages();
     }
@@ -1262,6 +1323,7 @@ async function applyPassphrase(event) {
     derivedKeys.set(conversationId, key);
     try { sessionStorage.setItem(PASSPHRASE_KEY_PREFIX + conversationId, passphrase); } catch { /* ignore */ }
     plainCache.clear();
+    mediaCache.clear();
     unlockOpen = false;
     $("conv-passphrase").value = "";
     updateLockUI();
@@ -1324,6 +1386,7 @@ async function openConversation(conversationId, label, avatarName) {
   currentConversationId = conversationId;
   messageStore = [];
   plainCache.clear();
+  mediaCache.clear();
   messageStatus.clear();
   expandedBlocks.clear();
   lastRenderedCount = 0;
@@ -1514,7 +1577,7 @@ async function renderAllMessages({ forceStick = false } = {}) {
   const conversationId = currentConversationId;
   if (conversationId === null) return;
 
-  await Promise.all(messageStore.map((m) => ensurePlain(m)));
+  await Promise.all(messageStore.flatMap((m) => [ensurePlain(m), ensureMedia(m)]));
   if (currentConversationId !== conversationId) return;
 
   const wrap = $("messages-wrap");
@@ -1596,8 +1659,10 @@ function buildMessageItem(msg, contPrev, contNext, isGroup) {
   const bubble = document.createElement("div");
   bubble.className = "bubble";
 
-  const safeUrl = safeHttpsUrl(msg.media_url);
-  if (safeUrl) bubble.appendChild(buildMedia(safeUrl));
+  const media = resolveMedia(msg);
+  if (media.state === "ready") bubble.appendChild(buildMedia(media.url));
+  else if (media.state === "locked") bubble.appendChild(buildMediaPlaceholder("lock", "Attachment locked"));
+  else if (media.state === "failed") bubble.appendChild(buildMediaPlaceholder("alert", "Can't load this attachment"));
 
   // textContent (never innerHTML): decrypted text comes from another user and
   // must not be able to inject markup/script into this page.
@@ -1615,7 +1680,7 @@ function buildMessageItem(msg, contPrev, contNext, isGroup) {
       sealedWithKeys ? "Can't decrypt. It may have been changed or was written for another key." : "Can't decrypt. The passphrase may not match."
     ));
     bubble.appendChild(failed);
-  } else if (!(plaintext === "(attachment)" && safeUrl)) {
+  } else if (!(plaintext === "(attachment)" && media.state !== "none")) {
     const body = document.createElement("div");
     body.className = "msg-text";
     body.textContent = plaintext;
@@ -1642,6 +1707,13 @@ function buildMessageItem(msg, contPrev, contNext, isGroup) {
 
   li.appendChild(bubble);
   return li;
+}
+
+function buildMediaPlaceholder(icon, label) {
+  const el = document.createElement("div");
+  el.className = "media media-placeholder";
+  el.append(iconSvg(icon), document.createTextNode(label));
+  return el;
 }
 
 function extOf(pathname) {
@@ -1765,8 +1837,16 @@ async function sendMessage() {
   const conversationId = currentConversationId;
 
   try {
-    let media_url = null, media_public_id = null;
+    // Sealed on this device either way; the server only ever receives ciphertext.
+    const seal = (plaintext) => convMode === "keys"
+      ? JC.encrypt(sendKey, plaintext, conversationId, currentProfile.id)
+      : encryptText(plaintext);
+
+    let encrypted_media = null;
     if (pendingFile) {
+      // The FILE ITSELF is uploaded as-is (see README, "Encrypted media" — this is the
+      // cheaper of two designs). What's encrypted is the reference to it: without the
+      // conversation's key, the message row alone does not say where the attachment is.
       const form = new FormData();
       form.append("file", pendingFile);
       form.append("conversation_id", conversationId);
@@ -1774,14 +1854,15 @@ async function sendMessage() {
       if (!uploadRes) return;
       const uploadData = await readJson(uploadRes);
       if (!uploadRes.ok) return toast(`Upload failed: ${uploadData.error}`, "error");
-      media_url = uploadData.secure_url;
-      media_public_id = uploadData.public_id;
+      encrypted_media = await seal(JSON.stringify({
+        url: uploadData.secure_url,
+        public_id: uploadData.public_id,
+        resource_type: uploadData.resource_type,
+        format: uploadData.format,
+      }));
     }
 
-    // Sealed on this device either way; the server only ever receives ciphertext.
-    const encrypted_content = convMode === "keys"
-      ? await JC.encrypt(sendKey, text || "(attachment)", conversationId, currentProfile.id)
-      : await encryptText(text || "(attachment)");
+    const encrypted_content = await seal(text || "(attachment)");
 
     const res = await apiFetch("/messages/send", {
       method: "POST",
@@ -1789,8 +1870,7 @@ async function sendMessage() {
       body: JSON.stringify({
         conversation_id: conversationId,
         encrypted_content,
-        media_url,
-        media_public_id,
+        encrypted_media,
       }),
     });
     if (!res) return;

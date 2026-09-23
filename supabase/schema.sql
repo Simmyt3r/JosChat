@@ -78,12 +78,18 @@ create table if not exists messages (
     conversation_id     bigint not null references conversations (id) on delete cascade,
     sender_id           uuid not null references profiles (id),
     encrypted_content    text not null,          -- ciphertext produced client-side (E2EE)
-    media_url           text,                    -- Cloudinary secure_url, if any
-    media_public_id     text,                    -- Cloudinary public_id, for later management
+    media_url           text,                    -- Cloudinary secure_url, if any (legacy, unencrypted; see encrypted_media)
+    media_public_id     text,                    -- Cloudinary public_id, for later management (legacy, unencrypted)
+    encrypted_media      text,                    -- ciphertext of {url, public_id, resource_type, format} (E2EE, same scheme as encrypted_content)
     block_index         bigint not null references blocks (index),
     block_hash          text not null,
     created_at          timestamptz not null default now()
 );
+
+-- Upgrading a database created before encrypted_media existed (additive; see
+-- README "Encrypted media" — the legacy media_url/media_public_id columns
+-- are read as a fallback for any message sent before this existed).
+alter table messages add column if not exists encrypted_media text;
 
 create index if not exists idx_messages_conversation on messages (conversation_id, created_at);
 

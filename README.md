@@ -229,7 +229,7 @@ and Preview, then redeploy.
 | POST | `/api/conversations` | Bearer | `{participant_usernames: [...] \| participant_ids: [...], is_group?, title?}` — returns the existing conversation (200) if the pair already has one |
 | GET | `/api/conversations` | Bearer | List the caller's conversations |
 | GET | `/api/conversations/<id>` | Bearer | Conversation + participants |
-| POST | `/api/messages/send` | Bearer | `{conversation_id, encrypted_content, media_url?, media_public_id?}` |
+| POST | `/api/messages/send` | Bearer | `{conversation_id, encrypted_content, encrypted_media?}` — `encrypted_media?` is ciphertext of `{url, public_id, ...}`; the plaintext `media_url?`/`media_public_id?` fields are still accepted too (for any older or other client) but the bundled client never sends them |
 | GET | `/api/messages/<conversation_id>` | Bearer | Message history (paginated via `?before=`) |
 | GET | `/api/messages/verify/<conversation_id>` | Bearer | Per-message blockchain verification |
 | POST | `/api/media/upload` | Bearer | multipart `file` (+ `conversation_id`) → Cloudinary URL |
@@ -272,8 +272,27 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   a malicious server could swap one — compare the *safety number* with your contact
   (the app also warns when a contact's key changes); there is no forward secrecy
   (long-lived keys); and keys belong to one browser, so a new device must set up new
-  keys and cannot read messages sealed to the old one. Media files are not yet
-  encrypted.
+  keys and cannot read messages sealed to the old one.
+- **Encrypted media**: what's encrypted is the *reference* to an attachment, not the
+  file's bytes. Uploading still sends the file to `/api/media/upload` and then
+  Cloudinary as-is (so Cloudinary can generate previews/thumbnails and the upload
+  step can still be size/type-checked); once Cloudinary returns its URL, the client
+  seals `{url, public_id, resource_type, format}` with the same key that seals the
+  conversation's text (`encrypted_media` in the `messages` table) and sends only
+  that. A message row on its own no longer says where — or in which conversation —
+  an attachment lives, and the same tamper-evidence applies (moving a sealed
+  reference to another conversation or message fails to decrypt, exactly like text).
+  Decrypting an attachment also checks the URL is `https://res.cloudinary.com/<this
+  project's cloud name>/…` before it is ever fetched, since the server can no longer
+  check that itself once the reference is ciphertext (`isTrustedMediaUrl` in
+  `app.js`; the cloud name is served from `/api/config`). What this does **not**
+  give you: anyone who obtains a Cloudinary URL — from the decrypted reference, or by
+  guessing/scanning `public_id`s — can view that file without being a participant,
+  since Cloudinary does not check who is asking. Full end-to-end encryption of the
+  bytes themselves (encrypt client-side before upload, decrypt into a blob URL after
+  download) is the more thorough alternative; it was left for future work here.
+  Messages sent before this existed keep their old, unencrypted `media_url`/
+  `media_public_id`, which the client still renders (through the same trust check).
 - **Blockchain decentralisation**: the chain is a single, private,
   application-layer hash chain hosted by your Supabase project, not a
   multi-node consensus network — see Chapter 2 of the project report for

@@ -84,6 +84,10 @@ def create_app():
         return jsonify({
             "supabase_url": Config.SUPABASE_URL,
             "supabase_anon_key": Config.SUPABASE_ANON_KEY,
+            # Lets the client confirm a decrypted media URL actually points at this
+            # app's own Cloudinary storage before it is fetched/rendered, now that
+            # the server can no longer check the (encrypted) media reference itself.
+            "cloudinary_cloud_name": Config.CLOUDINARY_CLOUD_NAME,
         }), 200
 
     @app.route("/", methods=["GET"])

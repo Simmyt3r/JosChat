@@ -430,6 +430,11 @@ body.in-app #bg-canvas { display: none; }
 .media { margin: 0.1rem 0 0.35rem; }
 .media img, .media video { display: block; width: auto; height: auto; max-width: min(100%, 18rem); max-height: 15rem; border-radius: 0.7rem; background: var(--base); }
 .media audio { display: block; width: min(16rem, 100%); }
+.media-placeholder {
+  display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.5rem 0.75rem;
+  border-radius: 0.7rem; background: rgba(0, 0, 0, 0.18); font-size: 0.88rem; font-style: italic; opacity: 0.9;
+}
+.theirs .media-placeholder { background: var(--raised); }
 .file-chip {
   display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.7rem;
   border-radius: 0.7rem; background: rgba(0, 0, 0, 0.18); color: inherit; text-decoration: none; font-size: 0.9rem; font-weight: 500;

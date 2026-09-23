@@ -8,9 +8,13 @@ def test_health_ok(client):
     assert r.status_code == 200 and r.get_json()["status"] == "ok"
 
 
-def test_public_config_exposes_only_url_and_anon_key(client):
+def test_public_config_exposes_only_whats_meant_to_be_public(client):
+    # The Supabase anon key and the Cloudinary cloud name are both, by design, meant
+    # to be visible to the browser (every media URL already contains the cloud name);
+    # nothing secret (a service-role key, an API secret) belongs in this response.
     body = client.get("/api/config").get_json()
-    assert set(body) == {"supabase_url", "supabase_anon_key"}
+    assert set(body) == {"supabase_url", "supabase_anon_key", "cloudinary_cloud_name"}
+    assert "secret" not in str(body).lower() and "service_role" not in str(body).lower()
 
 
 def test_index_served(client):
