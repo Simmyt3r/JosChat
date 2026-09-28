@@ -423,6 +423,7 @@ function showChatHome() {
   showList();
   keysReady = initMyKeys();
   loadConversations();
+  subscribeToIncomingCalls();
 }
 
 function setSetupError(text) {
@@ -546,6 +547,8 @@ async function restoreSession() {
 async function signOut(message) {
   const token = accessToken;
   closeConversation();
+  teardownCall(null);
+  unsubscribeFromIncomingCalls();
   accessToken = refreshToken = currentProfile = null;
   conversations = null;
   messageStore = [];
@@ -1435,6 +1438,7 @@ async function openConversation(conversationId, label, avatarName) {
       if (p.public_key) participantKeys[p.user_id] = p.public_key;
     }
   }
+  updateCallAvailability();
   await keysReady;
   if (currentConversationId !== conversationId) return;
   keyInfo = await computeKeyState();
@@ -2041,6 +2045,19 @@ function bindEvents() {
   $("security-btn").addEventListener("click", openSecurityDialog);
   $("security-close").addEventListener("click", closeSecurityDialog);
   $("security-replace-btn").addEventListener("click", setUpKeysOnThisDevice);
+
+  // Calling
+  $("voice-call-btn").addEventListener("click", () => startOutgoingCall("voice"));
+  $("video-call-btn").addEventListener("click", () => startOutgoingCall("video"));
+  $("accept-call-btn").addEventListener("click", acceptIncomingCall);
+  $("decline-call-btn").addEventListener("click", () => declineActiveCall("missed"));
+  $("hangup-call-btn").addEventListener("click", hangUpActiveCall);
+  $("toggle-mic-btn").addEventListener("click", toggleMic);
+  $("toggle-camera-btn").addEventListener("click", toggleCamera);
+  // The Escape key's native <dialog> "cancel" would otherwise close the dialog
+  // without going through decline/hang-up, leaving activeCall state stale.
+  $("incoming-call-dialog").addEventListener("cancel", (e) => { e.preventDefault(); declineActiveCall("missed"); });
+  $("active-call-dialog").addEventListener("cancel", (e) => { e.preventDefault(); hangUpActiveCall(); });
   $("unlock-panel").addEventListener("submit", applyPassphrase);
   $("unlock-cancel").addEventListener("click", cancelUnlock);
   $("messages").addEventListener("click", onSealClick);
@@ -2091,94 +2108,385 @@ function bindEvents() {
 }
 
 // ---------------------------------------------------------------------------
-// WebRTC calling — SKETCH ONLY, not wired into the UI.
+// WebRTC calling
 //
-// Signalling runs over a Supabase Realtime Broadcast channel (peer-to-peer
-// media never touches the server once connected). Before this can be used for
-// real it still needs: an `ontrack` handler that plays the remote stream, a
-// "ringing" handshake so the offer isn't lost if the callee isn't listening
-// yet, call UI (buttons/accept/hang-up), and a TURN server for restrictive
-// networks. Left as-is deliberately so it isn't mistaken for a finished feature.
+// Signalling has two parts, both over Supabase Realtime (never through Flask,
+// and never through call media itself once connected):
+//   1. Ringing: starting a call is one INSERT into `calls` (via the REST API,
+//      so the backend can check both people are actually in the conversation).
+//      The callee's browser is listening for INSERT on `calls` filtered to its
+//      own id — a Realtime *subscription*, not a broadcast — so it doesn't
+//      need to already be "in" anything to be reachable. That row is also the
+//      durable call log the admin dashboard and call history read from.
+//   2. Once a call exists, both sides join a Realtime *Broadcast* channel
+//      named after the call's id and exchange the SDP offer/answer and ICE
+//      candidates directly with each other; call media itself is peer-to-peer
+//      (WebRTC/SRTP) and never touches Supabase or Flask at all. Presence on
+//      that channel is what tells the caller the callee has actually joined —
+//      this is the piece the original sketch of this feature left unsolved
+//      ("the offer isn't lost if the callee isn't listening yet"): the caller
+//      waits for presence to show two members before creating and sending the
+//      offer, so there is no race and no need to retry a lost message. Only
+//      the caller ever sends an offer, so two people can't glare by both
+//      answering with offers of their own.
+//
+// `activeCall` covers every phase from "ringing" to "hung up": there is at
+// most one call at a time, regardless of which conversation (if any) is open.
 // ---------------------------------------------------------------------------
 
-let peerConnection = null;
+let callsChannel = null;   // subscribed once per session: "is anyone calling me?"
+let activeCall = null;
+/* shape while a call is in progress:
+   { id, conversationId, peerId, peerName, type,   // "voice" | "video"
+     role,                                          // "caller" | "callee"
+     phase,               // "ringing-out" | "ringing-in" | "connecting" | "connected"
+     pc, localStream, channel, ringTimer, durationTimer, startedAt,
+     micMuted, cameraOff }
+*/
 
-function callChannelName(conversationId) {
-  return `call-${conversationId}`;
+function callAvailabilityProblem() {
+  if (!ensureSupabaseClient()) return "Calling needs the realtime library, which didn't load.";
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) return "This browser can't access a microphone or camera.";
+  if (!window.RTCPeerConnection) return "This browser doesn't support calling.";
+  if (Object.keys(currentParticipants).length !== 2) return "Calling is only available in one-to-one chats.";
+  if (activeCall) return "You're already on a call.";
+  return null;
 }
 
-async function startCall(conversationId, calleeId, callType = "voice") {
-  await apiFetch("/calls/start", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversation_id: conversationId, callee_id: calleeId, call_type: callType }),
+function updateCallAvailability() {
+  const problem = callAvailabilityProblem();
+  for (const [btn, label] of [[$("voice-call-btn"), "Voice call"], [$("video-call-btn"), "Video call"]]) {
+    btn.disabled = Boolean(problem);
+    btn.dataset.state = problem ? "unavailable" : "ready";
+    btn.title = problem || label;
+  }
+}
+
+function mediaErrorMessage(err) {
+  if (err && (err.name === "NotAllowedError" || err.name === "PermissionDeniedError")) return "Allow microphone/camera access to make a call.";
+  if (err && (err.name === "NotFoundError" || err.name === "DevicesNotFoundError")) return "No microphone or camera was found on this device.";
+  return "Couldn't access the microphone or camera.";
+}
+
+// --- the persistent "is anyone calling me?" subscription ---------------------
+
+function subscribeToIncomingCalls() {
+  const client = ensureSupabaseClient();
+  if (!client) return;   // calling stays unavailable; see callAvailabilityProblem()
+  applyToken();
+  const me = currentProfile.id;
+  callsChannel = client
+    .channel(`calls:${me}`)
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "calls", filter: `callee_id=eq.${me}` },
+        (payload) => onIncomingCallRow(payload.new))
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "calls", filter: `callee_id=eq.${me}` },
+        (payload) => onCallRowChanged(payload.new))
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "calls", filter: `caller_id=eq.${me}` },
+        (payload) => onCallRowChanged(payload.new))
+    .subscribe();
+}
+
+function unsubscribeFromIncomingCalls() {
+  const client = ensureSupabaseClient();
+  if (callsChannel && client) client.removeChannel(callsChannel);
+  callsChannel = null;
+}
+
+async function callerNameFor(row) {
+  if (currentConversationId === row.conversation_id && currentParticipants[row.caller_id]) {
+    return currentParticipants[row.caller_id];
+  }
+  const res = await apiFetch(`/conversations/${row.conversation_id}`);
+  if (res && res.ok) {
+    const info = await res.json();
+    const p = info.participants.find((x) => x.user_id === row.caller_id);
+    if (p) return p.username;
+  }
+  return "Someone";
+}
+
+async function onIncomingCallRow(row) {
+  if (row.status !== "initiated") return;
+  if (activeCall) {
+    // Already on a call: decline so the caller isn't left ringing forever.
+    endCallRow(row.id, "missed");
+    return;
+  }
+  activeCall = {
+    id: row.id, conversationId: row.conversation_id, peerId: row.caller_id,
+    peerName: await callerNameFor(row), type: row.call_type, role: "callee", phase: "ringing-in",
+    pc: null, localStream: null, channel: null, ringTimer: null, durationTimer: null,
+    micMuted: false, cameraOff: false,
+  };
+  if (!activeCall || activeCall.id !== row.id) return;   // superseded while awaiting the name lookup
+  updateCallAvailability();
+  showIncomingCallDialog();
+  activeCall.ringTimer = setTimeout(() => {
+    if (activeCall && activeCall.id === row.id && activeCall.phase === "ringing-in") declineActiveCall("missed");
+  }, 30000);
+}
+
+// The other side of a call I'm on changed it (declined, hung up, or — for an
+// outgoing call — accepted). Ending my end again if I already know is harmless
+// but wasted, so `phase` guards against acting twice on the same outcome.
+function onCallRowChanged(row) {
+  if (!activeCall || activeCall.id !== row.id) return;
+  if (row.status === "connected" && activeCall.role === "caller" && activeCall.phase === "ringing-out") {
+    setCallStatusText("Connecting…");   // the SDP itself still arrives over the broadcast channel
+  }
+  if (row.status === "missed" || row.status === "ended" || row.status === "failed") {
+    const message =
+      row.status === "failed" ? "Call failed" :
+      row.status === "missed" && activeCall.role === "caller" ? "No answer" :
+      row.status === "missed" ? "Call declined" : "Call ended";
+    teardownCall(message);
+  }
+}
+
+function endCallRow(id, status) {
+  apiFetch(`/calls/${id}/end`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }),
   });
+}
 
-  const localStream = await navigator.mediaDevices.getUserMedia({
-    audio: true, video: callType === "video",
+// --- starting, accepting, declining -----------------------------------------
+
+async function startOutgoingCall(type) {
+  const problem = callAvailabilityProblem();
+  if (problem) return toast(problem, "error");
+
+  const ids = Object.keys(currentParticipants);
+  const peerId = ids.find((id) => id !== currentProfile.id);
+  const peerName = currentParticipants[peerId];
+  const conversationId = currentConversationId;
+
+  let localStream;
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type === "video" });
+  } catch (err) {
+    return toast(mediaErrorMessage(err), "error");
+  }
+  if (activeCall) { localStream.getTracks().forEach((t) => t.stop()); return; }   // lost a race with an incoming call
+
+  const res = await apiFetch("/calls/start", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation_id: conversationId, callee_id: peerId, call_type: type }),
   });
+  if (!res) return localStream.getTracks().forEach((t) => t.stop());
+  const data = await readJson(res);
+  if (!res.ok) {
+    localStream.getTracks().forEach((t) => t.stop());
+    return toast(data.error || "Couldn't start the call.", "error");
+  }
 
-  peerConnection = new RTCPeerConnection({
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  });
-  localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+  activeCall = {
+    id: data.call.id, conversationId, peerId, peerName, type, role: "caller", phase: "ringing-out",
+    pc: null, localStream, channel: null, ringTimer: null, durationTimer: null, micMuted: false, cameraOff: false,
+  };
+  updateCallAvailability();
+  showActiveCallDialog();
+  setCallStatusText("Ringing…");
+  joinCallChannel();
+  activeCall.ringTimer = setTimeout(() => {
+    if (activeCall && activeCall.phase === "ringing-out") {
+      endCallRow(activeCall.id, "missed");
+      teardownCall("No answer");
+    }
+  }, 30000);
+}
 
-  const channel = ensureSupabaseClient().channel(callChannelName(conversationId));
+async function acceptIncomingCall() {
+  if (!activeCall || activeCall.phase !== "ringing-in") return;
+  clearTimeout(activeCall.ringTimer);
+  let localStream;
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: activeCall.type === "video" });
+  } catch (err) {
+    toast(mediaErrorMessage(err), "error");
+    endCallRow(activeCall.id, "failed");
+    teardownCall(null);
+    return;
+  }
+  if (!activeCall) return localStream.getTracks().forEach((t) => t.stop());   // declined while awaiting permission
+  activeCall.localStream = localStream;
+  activeCall.phase = "connecting";
+  hideIncomingCallDialog();
+  showActiveCallDialog();
+  setCallStatusText("Connecting…");
+  joinCallChannel();
+  apiFetch(`/calls/${activeCall.id}/accept`, { method: "POST" });   // the call log; live progress is the broadcast channel
+}
 
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate) {
-      channel.send({ type: "broadcast", event: "ice-candidate", payload: event.candidate });
+function declineActiveCall(status) {
+  if (!activeCall) return;
+  clearTimeout(activeCall.ringTimer);
+  endCallRow(activeCall.id, status || "missed");
+  teardownCall(null);
+}
+
+function hangUpActiveCall() {
+  if (!activeCall) return;
+  endCallRow(activeCall.id, activeCall.phase === "connected" ? "ended" : "missed");
+  teardownCall(null);
+}
+
+// --- the peer connection and its signalling channel --------------------------
+
+function joinCallChannel() {
+  const client = ensureSupabaseClient();
+  const call = activeCall;
+  let offerSent = false;
+
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  call.pc = pc;
+  call.localStream.getTracks().forEach((track) => pc.addTrack(track, call.localStream));
+
+  pc.ontrack = (event) => {
+    if (activeCall !== call) return;
+    $("remote-video").srcObject = event.streams[0];
+    $("call-stage").dataset.remoteLive = "true";
+  };
+  pc.onicecandidate = (event) => {
+    if (event.candidate) channel.send({ type: "broadcast", event: "ice-candidate", payload: event.candidate.toJSON() });
+  };
+  pc.onconnectionstatechange = () => {
+    if (activeCall !== call) return;
+    if (pc.connectionState === "connected" && call.phase !== "connected") {
+      call.phase = "connected";
+      call.startedAt = Date.now();
+      clearTimeout(call.ringTimer);
+      startDurationTimer();
+    } else if (pc.connectionState === "failed") {
+      endCallRow(call.id, "failed");
+      teardownCall("Call failed");
     }
   };
 
-  channel
-    .on("broadcast", { event: "answer" }, async ({ payload }) => {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(payload));
-    })
-    .on("broadcast", { event: "ice-candidate" }, async ({ payload }) => {
-      try { await peerConnection.addIceCandidate(payload); } catch (_) {}
-    })
-    .subscribe(async (status) => {
-      if (status !== "SUBSCRIBED") return;
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      channel.send({ type: "broadcast", event: "offer", payload: offer });
-    });
-}
-
-async function listenForIncomingCalls(conversationId, callType = "voice") {
-  const channel = ensureSupabaseClient().channel(callChannelName(conversationId));
+  const channel = client.channel(`call-${call.id}`, { config: { broadcast: { self: false }, presence: { key: currentProfile.id } } });
+  call.channel = channel;
 
   channel
     .on("broadcast", { event: "offer" }, async ({ payload }) => {
-      const accept = confirm("Incoming call — accept?");
-      if (!accept) return;
-
-      const localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true, video: callType === "video",
-      });
-
-      peerConnection = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
-      localStream.getTracks().forEach((t) => peerConnection.addTrack(t, localStream));
-      peerConnection.onicecandidate = (event) => {
-        if (event.candidate) {
-          channel.send({ type: "broadcast", event: "ice-candidate", payload: event.candidate });
-        }
-      };
-
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(payload));
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
+      if (activeCall !== call || call.role !== "callee") return;
+      await pc.setRemoteDescription(payload);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
       channel.send({ type: "broadcast", event: "answer", payload: answer });
     })
-    .on("broadcast", { event: "ice-candidate" }, async ({ payload }) => {
-      if (peerConnection) {
-        try { await peerConnection.addIceCandidate(payload); } catch (_) {}
-      }
+    .on("broadcast", { event: "answer" }, async ({ payload }) => {
+      if (activeCall !== call || call.role !== "caller") return;
+      await pc.setRemoteDescription(payload);
     })
-    .subscribe();
+    .on("broadcast", { event: "ice-candidate" }, async ({ payload }) => {
+      if (activeCall !== call) return;
+      try { await pc.addIceCandidate(payload); } catch (err) { console.warn("Bad ICE candidate", err); }
+    })
+    .on("presence", { event: "sync" }, async () => {
+      // Only the caller ever sends an offer (avoids two offers colliding), and
+      // only once presence proves the callee has actually joined this channel.
+      if (activeCall !== call || offerSent || call.role !== "caller") return;
+      const others = Object.keys(channel.presenceState()).filter((key) => key !== currentProfile.id);
+      if (!others.length) return;
+      offerSent = true;
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      channel.send({ type: "broadcast", event: "offer", payload: offer });
+    })
+    .subscribe(async (status) => {
+      if (status === "SUBSCRIBED") await channel.track({ online_at: Date.now() });
+    });
+}
+
+function teardownCall(message) {
+  if (!activeCall) return;
+  const call = activeCall;
+  activeCall = null;
+  clearTimeout(call.ringTimer);
+  clearInterval(call.durationTimer);
+  if (call.pc) { try { call.pc.close(); } catch { /* already closed */ } }
+  if (call.localStream) call.localStream.getTracks().forEach((t) => t.stop());
+  const client = ensureSupabaseClient();
+  if (call.channel && client) client.removeChannel(call.channel);
+  $("remote-video").srcObject = null;
+  $("local-video").srcObject = null;
+  hideIncomingCallDialog();
+  hideActiveCallDialog();
+  updateCallAvailability();
+  if (message) toast(message, /fail|declin/i.test(message) ? "error" : "info");
+}
+
+// --- mic / camera toggles -----------------------------------------------------
+
+function toggleMic() {
+  if (!activeCall || !activeCall.localStream) return;
+  activeCall.micMuted = !activeCall.micMuted;
+  activeCall.localStream.getAudioTracks().forEach((t) => { t.enabled = !activeCall.micMuted; });
+  const btn = $("toggle-mic-btn");
+  btn.setAttribute("aria-pressed", String(activeCall.micMuted));
+  setIcon(btn, activeCall.micMuted ? "mic-off" : "mic");
+  btn.title = activeCall.micMuted ? "Unmute microphone" : "Mute microphone";
+}
+
+function toggleCamera() {
+  if (!activeCall || !activeCall.localStream || activeCall.type !== "video") return;
+  activeCall.cameraOff = !activeCall.cameraOff;
+  activeCall.localStream.getVideoTracks().forEach((t) => { t.enabled = !activeCall.cameraOff; });
+  $("call-stage").dataset.cameraOff = String(activeCall.cameraOff);
+  const btn = $("toggle-camera-btn");
+  btn.setAttribute("aria-pressed", String(activeCall.cameraOff));
+  setIcon(btn, activeCall.cameraOff ? "video-off" : "video");
+  btn.title = activeCall.cameraOff ? "Turn on camera" : "Turn off camera";
+}
+
+// --- dialogs -------------------------------------------------------------------
+
+function openCallDialog(id) {
+  const d = $(id);
+  if (typeof d.showModal === "function") { if (!d.open) d.showModal(); } else d.setAttribute("open", "");
+}
+function closeCallDialog(id) {
+  const d = $(id);
+  if (typeof d.close === "function") { if (d.open) d.close(); } else d.removeAttribute("open");
+}
+
+function showIncomingCallDialog() {
+  paintAvatar($("incoming-call-avatar"), activeCall.peerName);
+  $("incoming-call-kind").textContent = activeCall.type === "video" ? "Incoming video call" : "Incoming voice call";
+  $("incoming-call-title").textContent = `@${activeCall.peerName}`;
+  openCallDialog("incoming-call-dialog");
+}
+function hideIncomingCallDialog() { closeCallDialog("incoming-call-dialog"); }
+
+function showActiveCallDialog() {
+  paintAvatar($("active-call-avatar"), activeCall.peerName);
+  $("active-call-title").textContent = `@${activeCall.peerName}`;
+  const stage = $("call-stage");
+  stage.dataset.kind = activeCall.type;
+  stage.dataset.remoteLive = "false";
+  stage.dataset.cameraOff = "false";
+  $("local-video").srcObject = activeCall.localStream;
+  $("toggle-camera-btn").hidden = activeCall.type !== "video";
+  const micBtn = $("toggle-mic-btn");
+  micBtn.setAttribute("aria-pressed", "false"); setIcon(micBtn, "mic"); micBtn.title = "Mute microphone";
+  if (activeCall.type === "video") {
+    const camBtn = $("toggle-camera-btn");
+    camBtn.setAttribute("aria-pressed", "false"); setIcon(camBtn, "video"); camBtn.title = "Turn off camera";
+  }
+  openCallDialog("active-call-dialog");
+}
+function hideActiveCallDialog() { closeCallDialog("active-call-dialog"); }
+
+function setCallStatusText(text) { $("active-call-status").textContent = text; }
+
+function startDurationTimer() {
+  const call = activeCall;
+  const tick = () => {
+    if (activeCall !== call) return;
+    const secs = Math.max(0, Math.floor((Date.now() - call.startedAt) / 1000));
+    setCallStatusText(`${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`);
+  };
+  tick();
+  call.durationTimer = setInterval(tick, 1000);
 }
 
 // ---------------------------------------------------------------------------

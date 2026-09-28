@@ -61,6 +61,12 @@
       <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12.5"/><line x1="12" y1="16" x2="12.01" y2="16"/></symbol>
       <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><polyline points="14 3 14 8 19 8"/></symbol>
       <symbol id="i-key" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><path d="M4 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L14 13l5 2v4a2 2 0 0 1-2 2A15 15 0 0 1 2 6a2 2 0 0 1 2-2z"/></symbol>
+      <symbol id="i-video" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-3.5v11L16 14"/></symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4M8 22h8"/></symbol>
+      <symbol id="i-mic-off" viewBox="0 0 24 24"><path d="M1 1l22 22M9 5a3 3 0 0 1 6 0v6a3 3 0 0 1-.35 1.41M15 9.34V5a3 3 0 0 0-4.6-2.54M5 11a7 7 0 0 0 10.6 5.94M19 11a7 7 0 0 1-.65 2.96M12 18v4M8 22h8"/></symbol>
+      <symbol id="i-video-off" viewBox="0 0 24 24"><path d="M1 1l22 22"/><path d="M16 8.5L22 5v11l-4.5-2.63M14.7 6H4a2 2 0 0 0-2 2v8c0 .4.1.77.3 1.09M9.5 18H14a2 2 0 0 0 2-2v-1"/></symbol>
+      <symbol id="i-phone-off" viewBox="0 0 24 24"><path d="M1 1l22 22"/><path d="M11.5 6.5L14 5l5 2v4l-1.5.94M18.9 15.9c-.6 2-2.3 3.6-4.4 3.2A15 15 0 0 1 4 9.5c-.3-2 .9-3.9 2.7-4.7l1.8 4.5-1.5.9c.9 1.6 2.3 3 4 4l.9-1.5 4.5 1.8"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
       <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></symbol>
       <symbol id="i-arrow-down" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></symbol>
@@ -251,6 +257,12 @@
               <span class="dot" aria-hidden="true"></span><span id="live-status">Connecting…</span>
             </p>
           </div>
+          <button type="button" class="icon-btn" id="voice-call-btn" aria-label="Start a voice call" title="Voice call">
+            <svg class="icon" aria-hidden="true"><use href="#i-phone" /></svg>
+          </button>
+          <button type="button" class="icon-btn" id="video-call-btn" aria-label="Start a video call" title="Video call">
+            <svg class="icon" aria-hidden="true"><use href="#i-video" /></svg>
+          </button>
           <button type="button" class="btn btn-secondary btn-compact" id="verify-btn">
             <svg class="icon" aria-hidden="true"><use href="#i-shield" /></svg>
             <span class="btn-label">Verify chat</span>
@@ -346,6 +358,47 @@
       </div>
     </section>
   </div>
+
+  <dialog id="incoming-call-dialog" class="dialog call-dialog" aria-labelledby="incoming-call-title">
+    <div class="call-ring">
+      <span class="avatar call-avatar" id="incoming-call-avatar" aria-hidden="true"></span>
+      <p class="call-kind" id="incoming-call-kind"></p>
+      <h2 id="incoming-call-title"></h2>
+    </div>
+    <div class="dialog-actions call-actions">
+      <button type="button" class="btn btn-decline" id="decline-call-btn">
+        <svg class="icon" aria-hidden="true"><use href="#i-phone-off" /></svg><span>Decline</span>
+      </button>
+      <button type="button" class="btn btn-accept" id="accept-call-btn">
+        <svg class="icon" aria-hidden="true"><use href="#i-phone" /></svg><span>Accept</span>
+      </button>
+    </div>
+  </dialog>
+
+  <dialog id="active-call-dialog" class="dialog call-dialog call-dialog-active" aria-labelledby="active-call-title">
+    <div class="call-stage" id="call-stage" data-kind="voice">
+      <video id="remote-video" autoplay playsinline></video>
+      <div class="call-voice-face">
+        <span class="avatar call-avatar" id="active-call-avatar" aria-hidden="true"></span>
+      </div>
+      <video id="local-video" autoplay playsinline muted></video>
+    </div>
+    <div class="call-meta">
+      <h2 id="active-call-title"></h2>
+      <p id="active-call-status"></p>
+    </div>
+    <div class="call-actions">
+      <button type="button" class="icon-btn call-control" id="toggle-mic-btn" aria-label="Mute microphone" aria-pressed="false" title="Mute microphone">
+        <svg class="icon" aria-hidden="true"><use href="#i-mic" /></svg>
+      </button>
+      <button type="button" class="btn btn-decline call-hangup" id="hangup-call-btn" aria-label="End call" title="End call">
+        <svg class="icon" aria-hidden="true"><use href="#i-phone-off" /></svg>
+      </button>
+      <button type="button" class="icon-btn call-control" id="toggle-camera-btn" aria-label="Turn off camera" aria-pressed="false" title="Turn off camera" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-video" /></svg>
+      </button>
+    </div>
+  </dialog>
 
   <dialog id="security-dialog" class="dialog" aria-labelledby="security-title">
     <h2 id="security-title">Security and keys</h2>

@@ -9,9 +9,16 @@ it avoids needing a persistent Flask server (which doesn't fit Vercel's
 serverless model). Flask's only job here is to keep a durable log of
 call sessions for the admin dashboard and call-history features.
 
-POST /api/calls/start   { conversation_id, callee_id, call_type }
-POST /api/calls/<id>/end
+POST /api/calls/start    { conversation_id, callee_id, call_type }
+POST /api/calls/<id>/accept
+POST /api/calls/<id>/end   { status? }   -- status one of connected|missed|ended|failed (default "ended")
 GET  /api/calls/<conversation_id>
+
+`status` on the `calls` row is a durable log, not the live signal: the callee's
+Realtime INSERT event is what actually rings the caller (an "initiated" row
+appearing for them), and a live Broadcast+Presence channel carries the
+SDP offer/answer and ICE candidates once a call is being set up — see the
+"WebRTC calling" section of static/js/app.js.
 """
 
 import uuid
@@ -53,6 +60,16 @@ def start_call():
             if not cur.fetchone():
                 return jsonify({"error": "Caller and callee must both be participants in the conversation"}), 403
 
+        # One call at a time per conversation — otherwise a double-click (or two
+        # people calling each other at once) leaves a stray "ringing" row neither
+        # side is actually listening to, since a client only tracks one call.
+        cur.execute(
+            "SELECT 1 FROM calls WHERE conversation_id = %s AND status IN ('initiated', 'connected')",
+            (conversation_id,),
+        )
+        if cur.fetchone():
+            return jsonify({"error": "There's already an active call in this conversation"}), 409
+
         cur.execute(
             """
             INSERT INTO calls (conversation_id, caller_id, callee_id, call_type, status)
@@ -64,6 +81,26 @@ def start_call():
         call = cur.fetchone()
 
     return jsonify({"call": dict(call)}), 201
+
+
+@calls_bp.route("/<int:call_id>/accept", methods=["POST"])
+@require_auth
+def accept_call(call_id):
+    """The callee picking up. Marks the call connected; does not touch ended_at."""
+    with db_cursor(commit=True) as cur:
+        cur.execute(
+            """
+            UPDATE calls SET status = 'connected'
+            WHERE id = %s AND callee_id = %s AND status = 'initiated'
+            RETURNING *
+            """,
+            (call_id, g.profile["id"]),
+        )
+        call = cur.fetchone()
+
+    if not call:
+        return jsonify({"error": "Call not found, already answered, or you're not the callee"}), 404
+    return jsonify({"call": dict(call)}), 200
 
 
 @calls_bp.route("/<int:call_id>/end", methods=["POST"])

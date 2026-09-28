@@ -419,7 +419,12 @@ revoke all on function validate_conversation(bigint) from public, anon, authenti
 -- Realtime
 -- Enable Realtime on `messages` so clients can subscribe to new rows
 -- (INSERT events) for a given conversation_id directly via supabase-js,
--- without needing a persistent Flask/Socket.IO server.
+-- without needing a persistent Flask/Socket.IO server. `calls` is enabled the
+-- same way, so a client can be notified the moment someone starts calling
+-- them (INSERT, filtered to callee_id) and learn when a call it's part of
+-- changes state (UPDATE, e.g. the other side declined or hung up) — this is
+-- the "ringing" signal; the call's own SDP/ICE exchange is a separate
+-- Realtime Broadcast channel per call, opened only once a call exists.
 -- ============================================================================
 do $$
 begin
@@ -429,5 +434,18 @@ begin
     ) then
         alter publication supabase_realtime add table messages;
     end if;
+    if not exists (
+        select 1 from pg_publication_tables
+        where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'calls'
+    ) then
+        alter publication supabase_realtime add table calls;
+    end if;
 end
 $$;
+
+-- Every incoming-call check filters by callee_id; every "did my outgoing call
+-- change state" check filters by caller_id; call history is read newest-first
+-- per conversation. All three are additive and safe to add to a live table.
+create index if not exists idx_calls_callee_id on calls (callee_id);
+create index if not exists idx_calls_caller_id on calls (caller_id);
+create index if not exists idx_calls_conversation_started on calls (conversation_id, started_at desc);

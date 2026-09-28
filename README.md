@@ -96,7 +96,7 @@ JosChat/
 2. Open **SQL Editor** → New query, paste the entire contents of
    `supabase/schema.sql`, and run it. This creates all tables, the
    `add_block`/`validate_chain`/`validate_conversation` functions, RLS
-   policies, and enables Realtime on `messages`.
+   policies, and enables Realtime on `messages` and `calls`.
 
 > Already ran an older `schema.sql`? Run the current one again — it is
 > idempotent, and it applies two fixes to an existing database: the hash
@@ -234,8 +234,9 @@ and Preview, then redeploy.
 | GET | `/api/messages/verify/<conversation_id>` | Bearer | Per-message blockchain verification |
 | POST | `/api/media/upload` | Bearer | multipart `file` (+ `conversation_id`) → Cloudinary URL |
 | DELETE | `/api/media/<public_id>` | Bearer | Remove a Cloudinary asset |
-| POST | `/api/calls/start` | Bearer | `{conversation_id, callee_id, call_type}` |
-| POST | `/api/calls/<id>/end` | Bearer | `{status?}` |
+| POST | `/api/calls/start` | Bearer | `{conversation_id, callee_id, call_type}` — 409 if a call is already active there |
+| POST | `/api/calls/<id>/accept` | Bearer | Callee only; marks the call `connected` |
+| POST | `/api/calls/<id>/end` | Bearer | `{status?}` — one of `connected\|missed\|ended\|failed`, default `ended` |
 | GET | `/api/calls/<conversation_id>` | Bearer | Call history for a conversation |
 | GET | `/api/admin/users` | Admin | List all users |
 | POST | `/api/admin/users/<id>/suspend` | Admin | Suspend a user |
@@ -317,10 +318,24 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   `tests/test_browser_access.py` checks all of this by acting as those roles.
   After adding a table, re-run `schema.sql` so it is locked down the same way
   (Supabase grants new tables to the browser roles by default).
-- **Calling is a sketch**: `startCall()` / `listenForIncomingCalls()` in
-  `static/js/app.js` are not wired to any button and are missing pieces (no
-  `ontrack` handler to play remote media, no "ringing" handshake). The
-  `/api/calls/*` endpoints only log call sessions.
+- **Calling**: one-to-one voice and video calls, in `static/js/app.js`
+  ("WebRTC calling"). Starting a call is a REST call (`POST /api/calls/start`,
+  which checks both people are participants); the callee's client learns about
+  it via a Realtime subscription to its own `calls` rows (no polling, no need
+  to already be "in" anything to be reachable) — this is the piece the
+  original sketch of this feature left as a known gap ("the offer isn't lost
+  if the callee isn't listening yet"). Once a call exists, the two clients
+  exchange the SDP offer/answer and ICE candidates over a Realtime Broadcast
+  channel named after the call, using Presence to know when both sides have
+  joined before the caller sends its offer — call media itself is peer-to-peer
+  and never touches Supabase or Flask. `calls.status` is the durable call log
+  (`initiated → connected/missed/failed → ended`), read by call history and
+  (eventually) the admin dashboard; it is not itself the live signal. Only
+  available for one-to-one conversations; group calling is out of scope.
+- **Browser tests**: `tests/e2e/` holds Playwright scripts that drive the real UI, including a
+  two-browser WebRTC call, with what is real and what is stood in for spelled out in its README.
 - **Call quality**: only a public STUN server is configured; a production
   deployment behind restrictive NATs/firewalls will need a TURN server
-  (e.g. via Twilio or a self-hosted coturn instance) as a fallback.
+  (e.g. via Twilio or a self-hosted coturn instance) as a fallback. Calling
+  also depends on the same Realtime connection messaging does — see the
+  "What the browser can do" note above.

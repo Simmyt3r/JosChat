@@ -603,3 +603,67 @@ body.in-app #bg-canvas { display: none; }
 .dialog-lead { font-weight: 500; margin-bottom: 0.9rem; }
 .dialog-note { font-size: 0.88rem; color: var(--dim); margin: 0.9rem 0 1.1rem; }
 .dialog-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-end; }
+
+/* ---------------------------------------------------------------------
+   Calling: header buttons, incoming-call ring, active-call stage
+--------------------------------------------------------------------- */
+#voice-call-btn[data-state="unavailable"], #video-call-btn[data-state="unavailable"] { opacity: 0.4; cursor: not-allowed; }
+#voice-call-btn[data-state="unavailable"]:hover, #video-call-btn[data-state="unavailable"]:hover { background: transparent; }
+
+.call-dialog { width: min(24rem, calc(100% - 2rem)); padding: 2rem 1.75rem 1.75rem; text-align: center; }
+
+.call-avatar {
+  width: 5.5rem; height: 5.5rem; margin: 0 auto; font-size: 2rem;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 45%, transparent);
+  animation: call-pulse 1.8s ease-out infinite;
+}
+@keyframes call-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 45%, transparent); }
+  70% { box-shadow: 0 0 0 1.1rem color-mix(in srgb, var(--primary) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .call-avatar { animation: none; } }
+
+.call-kind { margin: 1rem 0 0.15rem; font-size: 0.85rem; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.call-dialog #incoming-call-title, .call-dialog #active-call-title { font-size: 1.4rem; margin: 0; }
+.call-actions { justify-content: center; margin-top: 1.75rem; gap: 1.25rem; }
+
+.btn-accept, .btn-decline {
+  width: 3.5rem; height: 3.5rem; padding: 0; border-radius: 50%; flex-direction: column; gap: 0.15rem;
+}
+.call-dialog:not(.call-dialog-active) .btn-accept, .call-dialog:not(.call-dialog-active) .btn-decline { width: auto; height: auto; padding: 0.7rem 1.4rem; border-radius: 999px; flex-direction: row; }
+.btn-accept { background: var(--seal); color: #05291c; }
+.btn-accept:hover { background: color-mix(in srgb, var(--seal) 85%, black); }
+.btn-decline { background: var(--tamper); color: #2b0808; }
+.btn-decline:hover { background: color-mix(in srgb, var(--tamper) 85%, black); }
+.btn-accept .icon, .btn-decline .icon { width: 1.3rem; height: 1.3rem; }
+
+.call-dialog-active { width: min(30rem, calc(100% - 2rem)); padding: 1.25rem; }
+.call-stage {
+  position: relative; aspect-ratio: 4 / 3; border-radius: 0.9rem; overflow: hidden;
+  background: var(--base); display: grid; place-items: center;
+}
+#remote-video { width: 100%; height: 100%; object-fit: cover; background: var(--base); }
+.call-voice-face { position: absolute; inset: 0; display: grid; place-items: center; background: var(--base); }
+.call-stage[data-kind="voice"] #remote-video, .call-stage[data-kind="video"][data-remote-live="true"] .call-voice-face { display: none; }
+.call-stage .call-avatar { width: 5rem; height: 5rem; font-size: 1.9rem; animation: none; box-shadow: none; }
+#local-video {
+  position: absolute; right: 0.6rem; bottom: 0.6rem; width: 5.5rem; height: 4.1rem;
+  border-radius: 0.5rem; object-fit: cover; background: #000; box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.6);
+  transform: scaleX(-1);   /* a mirrored self-preview reads naturally, like a front camera viewfinder */
+}
+.call-stage[data-kind="voice"] #local-video, .call-stage[data-camera-off="true"] #local-video { display: none; }
+
+.call-meta { margin: 1rem 0 0; }
+.call-meta h2 { font-size: 1.15rem; }
+.call-meta p { margin-top: 0.2rem; font-size: 0.9rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+.call-control { width: 3rem; height: 3rem; background: var(--raised); color: var(--text); }
+.call-control[aria-pressed="true"] { background: var(--tamper); color: #2b0808; }
+.call-hangup { width: 3.75rem; height: 3.75rem; }
+
+@media (max-width: 859px) {
+  .call-dialog-active { width: 100vw; height: 100dvh; max-width: none; max-height: none; border-radius: 0; display: flex; flex-direction: column; padding: calc(1rem + var(--safe-top)) 1rem calc(1.25rem + var(--safe-bottom)); }
+  .call-stage { flex: 1; aspect-ratio: auto; border-radius: 0.7rem; }
+  .call-meta { margin-top: 0.75rem; }
+}
