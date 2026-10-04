@@ -22,6 +22,14 @@ def test_index_served(client):
     assert r.status_code == 200 and b"Joschat" in r.data
 
 
+def test_admin_page_served(client):
+    # The page itself carries no secrets and needs no auth to load — the
+    # security boundary is the /api/admin/* routes it calls, not this page.
+    r = client.get("/admin")
+    assert r.status_code == 200
+    assert b"admin" in r.data.lower()
+
+
 def test_service_worker_served_from_root_and_never_cached(client):
     r = client.get("/sw.js")
     assert r.status_code == 200
