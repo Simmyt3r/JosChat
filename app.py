@@ -95,6 +95,15 @@ def create_app():
         from flask import render_template
         return render_template("index.html")
 
+    @app.route("/admin", methods=["GET"])
+    def admin_page():
+        # This page is not itself the security boundary — it renders a
+        # client-side guard screen for anyone who isn't signed in as an
+        # admin, but every actual read/write happens through the
+        # @require_admin-gated /api/admin/* routes in routes/admin.py.
+        from flask import render_template
+        return render_template("admin.html")
+
     @app.route("/sw.js", methods=["GET"])
     def service_worker():
         # A service worker can only control pages at or below its own URL, so
