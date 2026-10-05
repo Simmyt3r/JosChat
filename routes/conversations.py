@@ -120,6 +120,21 @@ def create_conversation():
 @conversations_bp.route("", methods=["GET"])
 @require_auth
 def list_conversations():
+    """
+    Besides the conversation rows themselves, this also hands the client
+    everything it needs to render a useful chat list without a round trip
+    per row:
+      - other_public_key: the one other participant's E2EE public key, for
+        a direct chat only (never for a group, where "the other key" isn't
+        well-defined) -- lets the client try decrypting the preview below
+        without first opening the conversation.
+      - last_message_*: the newest message's ciphertext + who sent it, so
+        the client can show a preview (it still can't read anything the
+        server can, since this is still ciphertext).
+      - integrity_ok: the same chain check behind "Verify chat", run once
+        per conversation so the list can show a tamper indicator without
+        the person having to open every chat and press Verify.
+    """
     with db_cursor() as cur:
         cur.execute(
             """
@@ -129,13 +144,34 @@ def list_conversations():
                        FROM conversation_participants cp2
                        JOIN profiles pr ON pr.id = cp2.user_id
                        WHERE cp2.conversation_id = c.id AND cp2.user_id <> %s
-                   ), ARRAY[]::text[]) AS other_usernames
+                   ), ARRAY[]::text[]) AS other_usernames,
+                   (
+                       SELECT pr.public_key
+                       FROM conversation_participants cp3
+                       JOIN profiles pr ON pr.id = cp3.user_id
+                       WHERE cp3.conversation_id = c.id AND cp3.user_id <> %s AND NOT c.is_group
+                   ) AS other_public_key,
+                   lm.id AS last_message_id,
+                   lm.sender_id AS last_message_sender_id,
+                   lm.encrypted_content AS last_message_ciphertext,
+                   lm.created_at AS last_message_at,
+                   COALESCE(iv.all_verified, true) AS integrity_ok
             FROM conversations c
             JOIN conversation_participants cp ON cp.conversation_id = c.id
+            LEFT JOIN LATERAL (
+                SELECT id, sender_id, encrypted_content, created_at
+                FROM messages m
+                WHERE m.conversation_id = c.id
+                ORDER BY m.created_at DESC
+                LIMIT 1
+            ) lm ON true
+            LEFT JOIN LATERAL (
+                SELECT bool_and(verified) AS all_verified FROM validate_conversation(c.id)
+            ) iv ON true
             WHERE cp.user_id = %s
-            ORDER BY c.created_at DESC
+            ORDER BY COALESCE(lm.created_at, c.created_at) DESC
             """,
-            (g.profile["id"], g.profile["id"]),
+            (g.profile["id"], g.profile["id"], g.profile["id"]),
         )
         conversations = cur.fetchall()
 
