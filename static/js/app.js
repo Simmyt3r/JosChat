@@ -39,6 +39,7 @@ const PASSPHRASE_KEY_PREFIX = "joschat_pass_";
 const THEME_KEY = "joschat_theme";
 const MODE_PREFIX = "joschat_mode_";           // per conversation: "keys" | "passphrase"
 const PEERKEYS_PREFIX = "joschat_peerkeys_";   // per contact: public keys this device has accepted, newest first
+const ONBOARDED_PREFIX = "joschat_onboarded_"; // per account id: this device has shown the welcome tour
 const JC = window.JoschatCrypto;
 const POLL_INTERVAL_MS = 4000;
 
@@ -74,6 +75,8 @@ const mediaCache = new Map();     // messageId -> {url, ...} once decrypted+trus
 const messageStatus = new Map();  // messageId -> "verified" | "tampered" (session only)
 const expandedBlocks = new Set(); // messageIds whose block details are open
 const drafts = new Map();         // conversationId -> unsent text
+const previewCache = new Map();   // last_message_id -> decrypted preview text (or undefined if locked/failed)
+const previewKeyCache = new Map(); // conversationId -> CryptoKey, for decrypting a keys-sealed preview without opening the chat
 
 let unlockOpen = false;           // passphrase panel open while already unlocked (changing it)
 let myKeys = null;                // { privateKey, publicKey, fingerprint }: this device's key pair, when it matches the server's copy
@@ -194,7 +197,8 @@ function paintAvatar(el, name) {
 
 // --- Views ------------------------------------------------------------------
 
-function showView(name) {   // "auth" | "setup" | "chat"
+function showView(name) {   // "landing" | "auth" | "setup" | "chat"
+  $("landing-view").hidden = name !== "landing";
   $("auth-view").hidden = name !== "auth";
   $("setup-view").hidden = name !== "setup";
   $("chat-shell").hidden = name !== "chat";
@@ -422,8 +426,27 @@ function showChatHome() {
   showView("chat");
   showList();
   keysReady = initMyKeys();
+  keysReady.then(() => { if (conversations) renderConversationList(); });
   loadConversations();
   subscribeToIncomingCalls();
+  maybeShowOnboarding();
+}
+
+// Shown once per account on this device, the first time it reaches the chat
+// view -- a quick orientation to the three things that make Joschat
+// different (the chain, the two encryption schemes, peer-to-peer calls)
+// before diving in. A per-account localStorage flag (not sessionStorage)
+// means it stays skipped across reloads and future logins on this device.
+function maybeShowOnboarding() {
+  if (!currentProfile) return;
+  const key = ONBOARDED_PREFIX + currentProfile.id;
+  let seen = null;
+  try { seen = localStorage.getItem(key); } catch { /* ignore */ }
+  if (seen) return;
+  try { localStorage.setItem(key, "1"); } catch { /* ignore */ }
+  $("onboarding-name").textContent = `@${currentProfile.username}`;
+  const dialog = $("onboarding-dialog");
+  if (typeof dialog.showModal === "function") dialog.showModal();
 }
 
 function setSetupError(text) {
@@ -562,6 +585,8 @@ async function signOut(message) {
   mediaCache.clear();
   messageStatus.clear();
   drafts.clear();
+  previewCache.clear();
+  previewKeyCache.clear();
   try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
   if (token) {
     // Best effort; the token may already be dead.
@@ -592,15 +617,99 @@ function hasPassphrase(conversationId) {
   try { return Boolean(sessionStorage.getItem(PASSPHRASE_KEY_PREFIX + conversationId)); } catch { return false; }
 }
 
-function conversationSubline(conv) {
+function conversationStatusIcon(conv) {
   const mode = conv.id === currentConversationId ? convMode : storageGet(MODE_PREFIX + conv.id);
-  if (mode === "keys") {
-    // For the open chat we know whether the keys can actually be used right now.
+  if (mode === "keys") return "key";
+  if (hasPassphrase(conv.id)) return "unlock";
+  return "lock";
+}
+
+function conversationSubline(conv) {
+  const icon = conversationStatusIcon(conv);
+  if (icon === "key") {
     const usable = conv.id !== currentConversationId || (keyInfo && keyInfo.state === "ready");
-    return usable ? { icon: "key", text: "Secured with keys" } : { icon: "key", text: "Keys needed" };
+    return { icon, text: usable ? "Secured with keys" : "Keys needed" };
   }
-  if (hasPassphrase(conv.id)) return { icon: "unlock", text: "Unlocked" };
-  return { icon: "lock", text: "Encrypted" };
+  return { icon, text: icon === "unlock" ? "Unlocked" : "Encrypted" };
+}
+
+// Tries to derive the AES-GCM key for a conversation's "secured with keys"
+// scheme without opening it, from this device's own key pair plus the one
+// other participant's public key the list endpoint already hands over (see
+// routes/conversations.py). Only possible for a direct chat -- a group's
+// messages are always sealed with the shared passphrase instead.
+async function ensurePreviewKeysKey(conv) {
+  if (!myKeys || myKeyStatus !== "ready" || !conv.other_public_key) return null;
+  if (previewKeyCache.has(conv.id)) return previewKeyCache.get(conv.id);
+  try {
+    const peerFingerprint = await JC.fingerprintOf(conv.other_public_key);
+    const key = await JC.deriveConversationKey({
+      privateKey: myKeys.privateKey, peerPublicKey: conv.other_public_key,
+      ownFingerprint: myKeys.fingerprint, peerFingerprint, conversationId: conv.id,
+    });
+    previewKeyCache.set(conv.id, key);
+    return key;
+  } catch {
+    return null;
+  }
+}
+
+// The passphrase scheme's key is per-conversation and only in memory once
+// that chat has been unlocked this tab session -- reusing it here (instead
+// of prompting again) is what lets an already-unlocked chat show a real
+// preview; one that hasn't been unlocked correctly stays "Encrypted message".
+async function ensurePreviewPassphraseKey(conversationId) {
+  if (derivedKeys.has(conversationId)) return derivedKeys.get(conversationId);
+  let saved = null;
+  try { saved = sessionStorage.getItem(PASSPHRASE_KEY_PREFIX + conversationId); } catch { /* ignore */ }
+  if (!saved) return null;
+  const key = await deriveKey(saved, conversationId);
+  derivedKeys.set(conversationId, key);
+  return key;
+}
+
+const previewInFlight = new Set();
+
+// Decrypts a conversation's last message for the chat list preview, caches
+// the result by message id, and re-renders the list once it resolves. If
+// the needed key simply isn't available YET (keys still loading, or this
+// passphrase chat was never unlocked this tab), nothing is cached, so it is
+// retried on the next render rather than stuck showing "Encrypted message"
+// forever once the key does become available.
+async function warmPreview(conv) {
+  const id = conv.last_message_id;
+  if (id == null || previewCache.has(id) || previewInFlight.has(id)) return;
+  previewInFlight.add(id);
+  try {
+    const sealedWithKeys = JC.isV2(conv.last_message_ciphertext);
+    const key = sealedWithKeys ? await ensurePreviewKeysKey(conv) : await ensurePreviewPassphraseKey(conv.id);
+    if (!key) return;
+    const text = sealedWithKeys
+      ? await JC.decrypt(key, conv.last_message_ciphertext, conv.id, conv.last_message_sender_id)
+      : await decryptWith(key, conv.last_message_ciphertext);
+    previewCache.set(id, text);
+  } finally {
+    previewInFlight.delete(id);
+  }
+  if (conversations) renderConversationList();
+}
+
+// What to show on a chat list row's second line: the decrypted preview of
+// the last message when it can be read on this device, "Encrypted message"
+// when it can't (yet, or ever), or "No messages yet" for an empty chat.
+function conversationPreviewLine(conv) {
+  const icon = conversationStatusIcon(conv);
+  if (conv.last_message_id == null) return { icon, text: "No messages yet" };
+
+  if (previewCache.has(conv.last_message_id)) {
+    const text = previewCache.get(conv.last_message_id);
+    if (text === undefined) return { icon, text: "Encrypted message" };
+    const mine = currentProfile && conv.last_message_sender_id === currentProfile.id;
+    return { icon, text: mine ? `You: ${text}` : text };
+  }
+
+  warmPreview(conv);
+  return { icon, text: "Encrypted message" };
 }
 
 function searchQuery() {
@@ -658,6 +767,16 @@ function renderConversationList() {
     av.className = "avatar";
     av.setAttribute("aria-hidden", "true");
     paintAvatar(av, conversationAvatarName(conv));
+    // A quiet default: the chain is expected to check out, so nothing shows
+    // unless it doesn't -- an integrity failure gets a visible mark instead
+    // of competing with a checkmark on every single row.
+    if (conv.integrity_ok === false) {
+      av.classList.add("has-dot");
+      const dot = document.createElement("span");
+      dot.className = "attention-dot is-tamper";
+      dot.title = "Tampering detected -- open this chat and verify.";
+      av.appendChild(dot);
+    }
 
     const text = document.createElement("span");
     text.className = "conv-text";
@@ -665,10 +784,13 @@ function renderConversationList() {
     name.className = "conv-name";
     name.textContent = conversationLabel(conv);
     const sub = document.createElement("span");
-    const line = conversationSubline(conv);
+    const line = conversationPreviewLine(conv);
     sub.className = "conv-sub";
     sub.appendChild(iconSvg(line.icon));
-    sub.appendChild(document.createTextNode(line.text));
+    const previewText = document.createElement("span");
+    previewText.className = "conv-preview-text";
+    previewText.textContent = line.text;
+    sub.appendChild(previewText);
     text.append(name, sub);
 
     btn.append(av, text);
@@ -1982,6 +2104,13 @@ function onSealClick(event) {
 // ---------------------------------------------------------------------------
 
 function bindEvents() {
+  // Landing
+  $("landing-theme-btn").addEventListener("click", toggleTheme);
+  $("landing-login-btn").addEventListener("click", () => { showView("auth"); setMode("login"); if (canHover()) $("email").focus(); });
+  $("landing-register-btn").addEventListener("click", () => { showView("auth"); setMode("register"); if (canHover()) $("username").focus(); });
+  $("auth-back-btn").addEventListener("click", () => showView("landing"));
+  $("onboarding-done-btn").addEventListener("click", () => $("onboarding-dialog").close());
+
   // Auth
   $("auth-form").addEventListener("submit", submitAuth);
   $("tab-login").addEventListener("click", () => setMode("login"));
@@ -2503,10 +2632,9 @@ function startDurationTimer() {
   } catch (err) {
     console.error(err);
   } finally {
-    // Nothing restored: show the login form.
-    if ($("auth-view").hidden && $("setup-view").hidden && $("chat-shell").hidden) {
-      showView("auth");
-      if (canHover()) $("email").focus();
+    // Nothing restored: show the landing page.
+    if ($("landing-view").hidden && $("auth-view").hidden && $("setup-view").hidden && $("chat-shell").hidden) {
+      showView("landing");
     }
     $("boot").hidden = true;
   }

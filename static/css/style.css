@@ -216,6 +216,52 @@ body.in-app #bg-canvas { display: none; }
 .setup-title { font-family: var(--font-display); font-size: 1.35rem; margin-top: 1.4rem; letter-spacing: -0.01em; }
 .setup-title + .tagline { margin-top: 0.35rem; }
 
+.auth-back {
+  position: absolute; top: 1.1rem; left: 1.1rem;
+}
+.auth-card { position: relative; }
+
+/* ---------------------------------------------------------------------
+   Landing
+--------------------------------------------------------------------- */
+.landing {
+  position: relative; z-index: 1; min-height: 100vh; min-height: 100dvh;
+  padding: calc(1.25rem + var(--safe-top)) 1.25rem calc(2.5rem + var(--safe-bottom));
+  display: flex; justify-content: center;
+}
+.landing-inner { width: min(56rem, 100%); }
+
+.landing-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.5rem 0 2.5rem;
+}
+
+.landing-hero { max-width: 36rem; padding: 1.5rem 0 3rem; }
+.landing-hero h1 {
+  font-family: var(--font-display); font-weight: 700; letter-spacing: -0.02em;
+  font-size: clamp(1.9rem, 4.5vw, 2.6rem); line-height: 1.15; margin: 0 0 0.9rem;
+}
+.landing-sub { color: var(--dim); font-size: 1.05rem; line-height: 1.55; max-width: 42ch; margin: 0 0 1.75rem; }
+.landing-cta { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.landing-cta .btn { min-width: 9.5rem; }
+
+.landing-features {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.75rem 1.5rem;
+  padding-top: 2rem; border-top: 1px solid var(--line-soft);
+}
+.feature-hex {
+  width: 2.5rem; height: 2.5rem; color: var(--primary); fill: none; stroke: var(--primary);
+  stroke-width: 4; margin-bottom: 0.9rem;
+}
+.feature-hex polygon { fill: color-mix(in srgb, var(--primary) 12%, transparent); stroke: var(--primary); }
+.feature-hex polyline, .feature-hex path[stroke-linecap] { fill: none; stroke: var(--primary); stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+.feature h2 { font-family: var(--font-display); font-size: 1.05rem; letter-spacing: -0.01em; margin: 0 0 0.4rem; }
+.feature p { color: var(--dim); font-size: 0.92rem; line-height: 1.5; margin: 0; }
+
+@media (max-width: 760px) {
+  .landing-features { grid-template-columns: 1fr; gap: 1.5rem; }
+}
+
 .segmented {
   display: grid; grid-template-columns: 1fr 1fr; gap: 0.25rem; padding: 0.25rem;
   background: var(--base); border: 1px solid var(--line); border-radius: var(--radius);
@@ -339,10 +385,13 @@ body.in-app #bg-canvas { display: none; }
 }
 .conv-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .conv-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conv-sub { display: flex; align-items: center; gap: 0.3rem; font-size: 0.82rem; color: var(--faint); }
-.conv-sub .icon { width: 0.85rem; height: 0.85rem; }
+.conv-sub { display: flex; align-items: center; gap: 0.3rem; font-size: 0.82rem; color: var(--faint); min-width: 0; }
+.conv-sub .icon { width: 0.85rem; height: 0.85rem; flex: none; }
+.conv-preview-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conv-sub.is-locked { color: var(--lock); }
 :root[data-theme="light"] .conv-sub.is-locked { color: var(--lock); }
+
+.attention-dot.is-tamper { background: var(--tamper); }
 
 .side-empty { padding: 2rem 1rem; text-align: center; color: var(--dim); font-size: 0.92rem; }
 .side-empty-title { font-family: var(--font-display); font-weight: 600; font-size: 1.05rem; color: var(--text); margin-bottom: 0.3rem; }
@@ -603,6 +652,15 @@ body.in-app #bg-canvas { display: none; }
 .dialog-lead { font-weight: 500; margin-bottom: 0.9rem; }
 .dialog-note { font-size: 0.88rem; color: var(--dim); margin: 0.9rem 0 1.1rem; }
 .dialog-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-end; }
+
+.onboarding-dialog { width: min(27rem, calc(100% - 2rem)); text-align: center; }
+.onboarding-hex { width: 2.75rem; height: 2.75rem; fill: var(--primary); margin-bottom: 0.9rem; }
+.onboarding-dialog h2 { font-size: 1.2rem; }
+.onboarding-dialog .dialog-lead { color: var(--dim); font-weight: 500; }
+.onboarding-list { list-style: none; margin: 1rem 0 1.4rem; padding: 0; text-align: left; display: flex; flex-direction: column; gap: 0.9rem; }
+.onboarding-list li { display: flex; gap: 0.75rem; align-items: flex-start; }
+.onboarding-list .icon { width: 1.2rem; height: 1.2rem; flex: none; margin-top: 0.1rem; color: var(--primary); }
+.onboarding-list span:last-child { font-size: 0.92rem; line-height: 1.5; color: var(--text); }
 
 /* ---------------------------------------------------------------------
    Calling: header buttons, incoming-call ring, active-call stage

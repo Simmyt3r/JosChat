@@ -84,9 +84,72 @@
     <span class="sr-only">Loading Joschat</span>
   </div>
 
+  <!-- ============================== Landing ============================== -->
+  <main id="landing-view" class="landing" hidden>
+    <div class="landing-inner">
+      <header class="landing-head">
+        <div class="lockup">
+          <svg class="logo" width="30" height="30" viewBox="0 0 100 100" aria-hidden="true">
+            <polygon points="50,6 90,28 90,72 50,94 10,72 10,28" fill="var(--primary)" />
+            <path d="M38 46 v-8 a12 12 0 0 1 24 0 v8" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" />
+            <rect x="34" y="46" width="32" height="24" rx="4" fill="#fff" />
+            <circle cx="50" cy="58" r="3.5" fill="var(--primary)" />
+          </svg>
+          <span class="wordmark">Joschat</span>
+        </div>
+        <button type="button" class="icon-btn" id="landing-theme-btn" aria-label="Switch to light theme" title="Switch theme">
+          <svg class="icon" aria-hidden="true"><use href="#i-sun" /></svg>
+        </button>
+      </header>
+
+      <section class="landing-hero">
+        <h1>Messages sealed in a chain you can verify.</h1>
+        <p class="landing-sub">
+          Joschat encrypts every message end-to-end and chains it into an append-only ledger, so
+          tampering with a single message — yours or the server's — doesn't go unnoticed.
+        </p>
+        <div class="landing-cta">
+          <button type="button" class="btn btn-primary" id="landing-register-btn">Create account</button>
+          <button type="button" class="btn btn-secondary" id="landing-login-btn">Log in</button>
+        </div>
+      </section>
+
+      <section class="landing-features" aria-label="What Joschat does">
+        <div class="feature">
+          <svg class="feature-hex" viewBox="0 0 100 100" aria-hidden="true">
+            <polygon points="50,4 93,27 93,73 50,96 7,73 7,27" />
+            <polyline points="30,52 44,66 70,38" />
+          </svg>
+          <h2>Tamper-evident by design</h2>
+          <p>Every message becomes a block, hashed and chained to the one before it. Verify any chat on demand, or watch it checked automatically.</p>
+        </div>
+        <div class="feature">
+          <svg class="feature-hex" viewBox="0 0 100 100" aria-hidden="true">
+            <polygon points="50,4 93,27 93,73 50,96 7,73 7,27" />
+            <path d="M38 50 v-9 a12 12 0 0 1 24 0 v9" fill="none" stroke-linecap="round" />
+            <rect x="34" y="50" width="32" height="23" rx="4" fill="currentColor" stroke="none" />
+          </svg>
+          <h2>Encrypted two ways</h2>
+          <p>Each device generates its own key pair, or a conversation can share a passphrase — either way, the server only ever sees ciphertext.</p>
+        </div>
+        <div class="feature">
+          <svg class="feature-hex" viewBox="0 0 100 100" aria-hidden="true">
+            <polygon points="50,4 93,27 93,73 50,96 7,73 7,27" />
+            <path d="M34 36h14l8 18-9 6a38 38 0 0 0 17 17l6-9 18 8v14c0 4-3 7-7 6A62 62 0 0 1 28 43c-1-4 2-7 6-7z" fill="currentColor" stroke="none" />
+          </svg>
+          <h2>Calls stay between you</h2>
+          <p>Voice and video connect peer-to-peer once the call is set up — Joschat's server only ever sees that a call happened, not its audio or video.</p>
+        </div>
+      </section>
+    </div>
+  </main>
+
   <!-- ============================== Log in / create account ============================== -->
   <main id="auth-view" class="auth" hidden>
     <div class="auth-card">
+      <button type="button" class="icon-btn auth-back" id="auth-back-btn" aria-label="Back to the Joschat overview">
+        <svg class="icon" aria-hidden="true"><use href="#i-back" /></svg>
+      </button>
       <div class="lockup">
         <svg class="logo" width="34" height="34" viewBox="0 0 100 100" aria-hidden="true">
           <polygon points="50,6 90,28 90,72 50,94 10,72 10,28" fill="var(--primary)" />
@@ -413,6 +476,32 @@
         <span class="spinner" aria-hidden="true"></span><span class="btn-label">Set up keys on this device</span>
       </button>
       <button type="button" class="btn btn-secondary" id="security-close">Close</button>
+    </div>
+  </dialog>
+
+  <!-- Shown once, the first time a new account reaches the chat view. -->
+  <dialog id="onboarding-dialog" class="dialog onboarding-dialog" aria-labelledby="onboarding-title">
+    <svg class="onboarding-hex" viewBox="0 0 100 100" aria-hidden="true">
+      <polygon points="50,6 90,28 90,72 50,94 10,72 10,28" />
+    </svg>
+    <h2 id="onboarding-title">Welcome to Joschat, <span id="onboarding-name"></span></h2>
+    <p class="dialog-lead">Three things worth knowing before your first chat:</p>
+    <ul class="onboarding-list">
+      <li>
+        <svg class="icon" aria-hidden="true"><use href="#i-shield" /></svg>
+        <span>Every message is chained to the one before it. Open <strong>Verify chat</strong> any time, or watch for the seal on each message.</span>
+      </li>
+      <li>
+        <svg class="icon" aria-hidden="true"><use href="#i-key" /></svg>
+        <span>This device just generated its own encryption key. A chat can also use a shared passphrase instead — either way, Joschat's server never sees your messages in plain text.</span>
+      </li>
+      <li>
+        <svg class="icon" aria-hidden="true"><use href="#i-phone" /></svg>
+        <span>Voice and video calls connect directly between devices once they're set up.</span>
+      </li>
+    </ul>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-primary btn-block" id="onboarding-done-btn">Start chatting</button>
     </div>
   </dialog>
 
