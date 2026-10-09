@@ -1,10 +1,10 @@
 /* Only encrypted message bodies enter this durable outbox. No plaintext, keys,
  * attachments or refresh tokens are persisted here. Access tokens expire normally. */
-const CACHE_NAME = "joschat-cache-v8";
+const CACHE_NAME = "joschat-cache-v9";
 const OUTBOX_DB = "joschat-outbox";
 const SYNC_TAG = "joschat-send-messages";
-const OFFLINE_URLS = ["/", "/static/js/app.js", "/static/js/background.js", "/static/js/crypto.js",
-  "/static/css/style.css", "/static/manifest.json", "/static/favicon.ico",
+const OFFLINE_URLS = ["/", "/app", "/static/js/app.js", "/static/js/background.js", "/static/js/crypto.js",
+  "/static/css/style.css", "/static/js/landing.js", "/static/css/landing.css", "/static/manifest.json", "/static/favicon.ico",
   "/static/icons/icon-192.png", "/static/icons/icon-512.png"];
 const clientOwners = new Map();
 let flushInFlight = null;
@@ -176,10 +176,12 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(handleSend(event)); return;
   }
   if (req.method !== "GET" || url.pathname.startsWith("/api/")) return;
-  // Cache the public shell and static assets only; never authenticated pages.
-  if (url.pathname !== "/" && !url.pathname.startsWith("/static/")) return;
+  // /app is a public HTML shell: private data is loaded separately from APIs.
+  // Keep query-specific login links usable offline without caching API/admin data.
+  if (url.pathname !== "/" && url.pathname !== "/app" && !url.pathname.startsWith("/static/")) return;
   event.respondWith(fetch(req).then((res) => {
     if (res.ok) event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(req, res.clone())));
     return res;
-  }).catch(() => caches.match(req)));
+  }).catch(async () => (await caches.match(req)) ||
+    ((url.pathname === "/app" || url.pathname === "/") ? caches.match(url.pathname) : undefined)));
 });

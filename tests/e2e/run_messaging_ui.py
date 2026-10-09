@@ -115,7 +115,9 @@ def fixture_api():
 
 def register(pg, name):
     pg.goto(BASE)
-    pg.click("#tab-register")
+    pg.click('.hero-actions a[href="/app?mode=register"]')
+    pg.wait_for_selector("#field-phone:not([hidden])")
+    assert pg.get_attribute("#tab-register", "aria-selected") == "true"
     pg.fill("#username", name); pg.fill("#email", f"{name}@example.com"); pg.fill("#password", "secret123")
     pg.fill("#phone-number", "bad")
     pg.click("#submit-btn")

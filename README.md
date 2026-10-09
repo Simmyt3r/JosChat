@@ -343,6 +343,13 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
 
 ## Messaging completion (October 2026)
 
+The public homepage (`/`) introduces Joschat, explains its features, and answers
+common questions. The messaging app is at `/app`; `/app?mode=register` opens the
+account form and `/app?mode=login` opens sign-in. Installed PWAs start at `/app`.
+The homepage and public app shell can render even when the backend is not yet
+configured. Service-worker cache v9 preserves both pages and supports offline
+app entry through query links, without caching API responses or admin pages.
+
 - **Automatic Verified badges:** message history and send responses include a
   server-computed integrity result. Realtime inserts are checked automatically
   in batches; Verify chat remains a manual recheck. Verification compares the

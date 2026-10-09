@@ -132,6 +132,9 @@ button { cursor: pointer; }
   stroke-linecap: round; stroke-linejoin: round;
 }
 
+.auth-home-link { display: block; width: fit-content; margin: 24px auto 0; font-size: 0.75rem; color: var(--dim); }
+.auth-home-link:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+
 #bg-canvas {
   position: fixed; inset: 0; z-index: 0; display: block;
   background: linear-gradient(180deg, var(--canvas-top), var(--canvas-bottom));

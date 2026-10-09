@@ -20,6 +20,15 @@ def test_public_config_exposes_only_whats_meant_to_be_public(client):
 def test_index_served(client):
     r = client.get("/")
     assert r.status_code == 200 and b"Joschat" in r.data
+    assert b"Good conversations." in r.data
+    assert b'href="/app?mode=register"' in r.data
+    assert b'id="auth-form"' not in r.data
+
+
+def test_chat_app_served_separately(client):
+    r = client.get("/app?mode=register")
+    assert r.status_code == 200 and b'id="auth-form"' in r.data
+    assert b'id="chat-shell"' in r.data
 
 
 def test_admin_page_served(client):
@@ -56,3 +65,7 @@ def test_missing_env_keeps_health_reachable_and_reports_why(monkeypatch):
 
     other = c.post("/api/auth/login", json={"email": "a@b.co", "password": "secret1"})
     assert other.status_code == 500 and "misconfigured" in other.get_json()["error"]
+
+    assert c.get("/").status_code == 200
+    assert c.get("/app").status_code == 200
+    assert c.get("/static/css/landing.css").status_code == 200

@@ -2717,7 +2717,7 @@ function startDurationTimer() {
 (async function init() {
   applyTheme(document.documentElement.dataset.theme || "dark");
   bindEvents();
-  setMode("login");
+  setMode(new URLSearchParams(window.location.search).get("mode") === "register" ? "register" : "login");
   try {
     await loadPublicConfig();
     await restoreSession();
@@ -2727,7 +2727,7 @@ function startDurationTimer() {
     // Nothing restored: show the login form.
     if ($("auth-view").hidden && $("setup-view").hidden && $("chat-shell").hidden) {
       showView("auth");
-      if (canHover()) $("email").focus();
+      if (canHover()) $(authMode === "register" ? "username" : "email").focus();
     }
     $("boot").hidden = true;
   }

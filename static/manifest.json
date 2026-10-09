@@ -1,7 +1,9 @@
 {
   "name": "Joschat - Secured Communication",
   "short_name": "Joschat",
-  "start_url": "/",
+  "id": "/",
+  "start_url": "/app",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0d1322",
   "theme_color": "#0d1322",

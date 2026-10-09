@@ -62,7 +62,9 @@ def create_app():
         @app.before_request
         def _block_until_configured():
             from flask import request as _req
-            if _req.path == "/api/health":
+            # Public pages and their assets stay reachable during configuration
+            # problems; the landing page does not depend on an API or database.
+            if _req.path in ("/", "/app", "/sw.js", "/api/health") or _req.path.startswith("/static/"):
                 return None
             return jsonify({
                 "error": "Server misconfigured — missing environment variables.",
@@ -93,6 +95,11 @@ def create_app():
     @app.route("/", methods=["GET"])
     def index():
         from flask import render_template
+        return render_template("landing.html")
+
+    @app.route("/app", methods=["GET"])
+    def chat_app():
+        from flask import render_template
         return render_template("index.html")
 
     @app.route("/admin", methods=["GET"])
@@ -108,7 +115,7 @@ def create_app():
     def service_worker():
         # A service worker can only control pages at or below its own URL, so
         # it has to be served from the site root ("/sw.js") — from
-        # /static/sw.js it could never control the app at "/". It must also
+        # /static/sw.js it could never control the app at "/app". It must also
         # never be cached by the browser/CDN, or updates would not roll out.
         from flask import send_from_directory
         resp = send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
