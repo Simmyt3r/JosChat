@@ -30,7 +30,7 @@ class FakeAuth:
 
 @pytest.fixture()
 def send(monkeypatch, client):
-    def _send(conversation_id, rows):
+    def _send(conversation_id, rows, **extra):
         route_cursors = []
 
         @contextmanager
@@ -48,7 +48,7 @@ def send(monkeypatch, client):
         monkeypatch.setattr("routes.messages.db_cursor", route_db)
         res = client.post(
             "/api/messages/send",
-            json={"conversation_id": conversation_id, "encrypted_content": CIPHERTEXT},
+            json={"conversation_id": conversation_id, "encrypted_content": CIPHERTEXT, **extra},
             headers={"Authorization": "Bearer t"},
         )
         return res, route_cursors[0]
@@ -56,7 +56,7 @@ def send(monkeypatch, client):
 
 
 def test_the_block_records_the_sender_and_the_conversation(send):
-    rows = [(1,), {"idx": 7, "block_hash": "h" * 64}, {"id": 1, "conversation_id": 42}]
+    rows = [(1,), {"idx": 7, "block_hash": "h" * 64}, {"id": 1, "conversation_id": 42}, {"verified": True}]
     res, cur = send(42, rows)
     assert res.status_code == 201
 
@@ -70,3 +70,31 @@ def test_a_non_participant_cannot_append_a_block(send):
     res, cur = send(42, [None])        # participant check finds nothing
     assert res.status_code == 403
     assert not any("add_block" in sql for sql, _ in cur.executed)
+
+
+def test_replay_returns_existing_message_without_another_block(send):
+    client_id = "33333333-3333-3333-3333-333333333333"
+    existing = {"id": 4, "conversation_id": 42, "encrypted_content": CIPHERTEXT,
+                "encrypted_media": None, "media_url": None, "media_public_id": None,
+                "block_hash": "h", "block_index": 0, "verified": True}
+    res, cur = send(42, [(1,), existing], client_message_id=client_id)
+    assert res.status_code == 200 and res.get_json()["duplicate"] is True
+    assert res.get_json()["message"]["verified"] is True
+    assert not any("add_block" in sql for sql, _ in cur.executed)
+
+
+def test_reused_client_id_with_different_content_is_rejected(send):
+    res, cur = send(42, [(1,), {"conversation_id": 43}],
+                    client_message_id="33333333-3333-3333-3333-333333333333")
+    assert res.status_code == 409
+    assert not any("add_block" in sql for sql, _ in cur.executed)
+
+
+def test_new_client_id_is_stored_and_verified(send):
+    client_id = "33333333-3333-3333-3333-333333333333"
+    res, cur = send(42, [(1,), None, {"idx": 0, "block_hash": "h"}, {"id": 1}, {"verified": True}],
+                    client_message_id=client_id)
+    assert res.status_code == 201 and res.get_json()["message"]["verified"] is True
+    inserts = [params for sql, params in cur.executed if "INSERT INTO messages" in sql]
+    assert inserts[0][-1] == client_id
+    assert any("pg_advisory_xact_lock" in sql for sql, _ in cur.executed)

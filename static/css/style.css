@@ -667,3 +667,14 @@ body.in-app #bg-canvas { display: none; }
   .call-stage { flex: 1; aspect-ratio: auto; border-radius: 0.7rem; }
   .call-meta { margin-top: 0.75rem; }
 }
+
+/* Groups and durable message delivery */
+.group-start { margin: 0 1rem .7rem; justify-content: center; }
+.group-members { color: var(--dim); font-size: .75rem; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#group-usernames { width: 100%; padding: .7rem; border: 1px solid var(--line); border-radius: .65rem; background: var(--raised); color: var(--text); font: inherit; resize: vertical; }
+.outbox-banner { margin: 0 1rem .7rem; padding: .6rem; border: 1px solid var(--line); border-radius: .65rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; font-size: .8rem; }
+.seal { display: inline-flex; align-items: center; gap: .25rem; width: auto; height: auto; min-height: 1.15rem; }
+.seal svg { width: 1.15rem; height: 1.15rem; flex: none; }
+.seal-label { font-size: .65rem; font-weight: 600; }
+.seal:disabled { opacity: .9; cursor: default; }
+.queued-remove { display: block; margin-top: .5rem; padding: .2rem 0; border: 0; background: transparent; color: inherit; text-decoration: underline; font-size: .7rem; }

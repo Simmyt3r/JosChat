@@ -63,7 +63,7 @@ def wire(monkeypatch):
     return _wire
 
 
-REGISTER = {"username": "alice", "email": "a@example.com", "password": "secret1"}
+REGISTER = {"username": "alice", "email": "a@example.com", "password": "secret1", "phone_number": "09039930006"}
 
 
 def _inserted_profile(cursors):
@@ -125,6 +125,29 @@ def test_register_username_taken_is_409(client, wire):
 def test_register_validation(client, wire, payload):
     wire(FakeAuth(signup=NEW_USER))
     assert client.post("/api/auth/register", json=payload).status_code == 400
+
+
+@pytest.mark.parametrize("phone", [None, "", "123", "abc", 9039930006, "+00012345678"])
+def test_phone_is_required_and_validated_before_signup(client, wire, phone):
+    cursors = wire(FakeAuth(signup=NEW_USER))
+    response = client.post("/api/auth/register", json={**REGISTER, "phone_number": phone})
+    assert response.status_code == 400
+    assert response.get_json()["field"] == "phone_number"
+    assert not cursors
+
+
+@pytest.mark.parametrize("phone", ["09039930006", "+234 903 993 0006", "002349039930006"])
+def test_phone_formats_share_one_canonical_value(client, wire, phone):
+    cursors = wire(FakeAuth(signup=NEW_USER))
+    response = client.post("/api/auth/register", json={**REGISTER, "phone_number": phone})
+    assert response.status_code == 201
+    assert _inserted_profile(cursors)[0][1][2] == "+2349039930006"
+
+
+def test_duplicate_phone_is_rejected_before_signup(client, wire):
+    cursors = wire(FakeAuth(signup=NEW_USER), fetch_rows=[None, {"id": "someone"}])
+    assert client.post("/api/auth/register", json=REGISTER).status_code == 409
+    assert not _inserted_profile(cursors)
 
 
 LOGIN = {"email": "a@example.com", "password": "secret1"}

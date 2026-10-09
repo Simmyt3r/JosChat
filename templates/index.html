@@ -112,6 +112,13 @@
             <p class="field-msg" id="username-msg">3–30 characters: letters, numbers, _ . or -</p>
           </div>
 
+          <div class="field" id="field-phone" hidden>
+            <label for="phone-number">Phone number</label>
+            <input id="phone-number" name="phone_number" type="tel" inputmode="tel" autocomplete="tel"
+                   maxlength="40" placeholder="09039930006 or +2349039930006" aria-describedby="phone-msg" />
+            <p class="field-msg" id="phone-msg">Required for registration. Your number stays private.</p>
+          </div>
+
           <div class="field">
             <label for="email">Email</label>
             <input id="email" name="email" type="email" inputmode="email" autocomplete="email"
@@ -171,6 +178,12 @@
                  spellcheck="false" maxlength="30" aria-describedby="setup-msg" />
           <p class="field-msg" id="setup-msg">3–30 characters: letters, numbers, _ . or -</p>
         </div>
+        <div class="field">
+          <label for="setup-phone">Phone number</label>
+          <input id="setup-phone" type="tel" inputmode="tel" autocomplete="tel" maxlength="40"
+                 placeholder="09039930006 or +2349039930006" aria-describedby="setup-phone-msg" />
+          <p class="field-msg" id="setup-phone-msg">Your number stays private.</p>
+        </div>
         <button type="submit" class="btn btn-primary btn-block" id="setup-btn">
           <span class="spinner" aria-hidden="true"></span>
           <span class="btn-label">Save username</span>
@@ -184,7 +197,7 @@
   <div id="chat-shell" class="shell" data-view="list" hidden>
     <div id="net-banner" class="net-banner" role="status" hidden>
       <svg class="icon" aria-hidden="true"><use href="#i-wifi-off" /></svg>
-      You're offline. Reconnect to send and receive messages.
+      You're offline. Text messages will queue here and send when you reconnect.
     </div>
 
     <aside class="sidebar" aria-label="Chats">
@@ -215,6 +228,14 @@
         </button>
       </div>
 
+      <button type="button" class="btn btn-secondary group-start" id="new-group-btn">
+        <svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg><span>New group</span>
+      </button>
+      <div class="outbox-banner" id="outbox-banner" role="status" hidden>
+        <span id="outbox-text"></span>
+        <button type="button" class="btn btn-secondary btn-compact" id="outbox-retry">Retry</button>
+      </div>
+
       <div class="side-scroll">
         <button type="button" class="new-chat-row" id="new-chat-row" hidden>
           <span class="avatar avatar-add" aria-hidden="true"><svg class="icon"><use href="#i-plus" /></svg></span>
@@ -242,7 +263,7 @@
           </g>
         </svg>
         <h2>Pick a chat to start talking</h2>
-        <p>Every message you send is sealed into a chain. Use <strong>Verify chat</strong> any time to check that nothing was changed.</p>
+        <p>Messages are checked automatically. A <strong>Verified</strong> badge means the message passed its integrity check. Use <strong>Verify chat</strong> to check again.</p>
       </div>
 
       <div id="thread-view" class="thread-view" hidden>
@@ -253,6 +274,7 @@
           <span class="avatar" id="thread-avatar" aria-hidden="true"></span>
           <div class="thread-id">
             <h2 id="conv-title"></h2>
+            <p id="group-members" class="group-members" hidden></p>
             <p class="thread-status" id="thread-status" data-state="connecting">
               <span class="dot" aria-hidden="true"></span><span id="live-status">Connecting…</span>
             </p>
@@ -358,6 +380,27 @@
       </div>
     </section>
   </div>
+
+  <dialog id="group-dialog" class="dialog" aria-labelledby="group-title">
+    <h2 id="group-title">Create a group</h2>
+    <p class="dialog-note">Choose a name and add 2–49 people by username. Everyone uses the same passphrase to unlock messages; share it privately.</p>
+    <form id="group-form" novalidate>
+      <div class="field">
+        <label for="group-name">Group name</label>
+        <input id="group-name" type="text" maxlength="80" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="group-usernames">Member usernames</label>
+        <textarea id="group-usernames" rows="3" maxlength="1600" placeholder="alice, bob" autocapitalize="none" spellcheck="false" aria-describedby="group-hint"></textarea>
+        <p class="field-msg" id="group-hint">Separate usernames with commas or spaces. You are added automatically.</p>
+      </div>
+      <p class="banner is-error" id="group-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-secondary" id="group-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="group-submit"><span class="spinner" aria-hidden="true"></span><span class="btn-label">Create group</span></button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="incoming-call-dialog" class="dialog call-dialog" aria-labelledby="incoming-call-title">
     <div class="call-ring">

@@ -16,6 +16,7 @@ approach cannot guarantee under concurrent requests.
 """
 
 from datetime import datetime
+import uuid
 
 from flask import Blueprint, request, jsonify, g
 
@@ -47,6 +48,8 @@ def _is_participant(cur, conversation_id, user_id) -> bool:
 @messages_bp.route("/send", methods=["POST"])
 @require_auth
 def send_message():
+    if request.headers.get("X-Joschat-Owner") not in (None, str(g.profile["id"])):
+        return jsonify({"error": "Queued message belongs to another account"}), 403
     data = request.get_json(silent=True) or {}
     conversation_id = data.get("conversation_id")
     encrypted_content = data.get("encrypted_content")
@@ -57,6 +60,12 @@ def send_message():
     # attachment's location isn't sitting in the message row as plain text. The file
     # itself still lives on Cloudinary unencrypted — see README, "Encrypted media".
     encrypted_media = data.get("encrypted_media")
+    client_message_id = data.get("client_message_id")
+    if client_message_id is not None:
+        try:
+            client_message_id = str(uuid.UUID(client_message_id))
+        except (ValueError, TypeError, AttributeError):
+            return jsonify({"error": "client_message_id must be a UUID"}), 400
 
     if not conversation_id or not encrypted_content:
         return jsonify({"error": "conversation_id and encrypted_content are required"}), 400
@@ -82,6 +91,27 @@ def send_message():
         if not _is_participant(cur, conversation_id, g.profile["id"]):
             return jsonify({"error": "Not a participant in this conversation"}), 403
 
+        if client_message_id:
+            # Serialize retries of the same sender/id before appending a block.
+            # The transaction lock plus unique index prevents orphan blocks and
+            # duplicate messages even when background sync races a foreground send.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f'{g.profile["id"]}:{client_message_id}',))
+            cur.execute("SELECT m.*, validate_message(m.id) AS verified FROM messages m "
+                        "WHERE sender_id = %s AND client_message_id = %s::uuid",
+                        (g.profile["id"], client_message_id))
+            existing = cur.fetchone()
+            if existing:
+                if any(existing.get(k) != v for k, v in {
+                    "conversation_id": conversation_id, "encrypted_content": encrypted_content,
+                    "encrypted_media": encrypted_media, "media_url": media_url,
+                    "media_public_id": media_public_id,
+                }.items()):
+                    return jsonify({"error": "client_message_id was already used for another message"}), 409
+                return jsonify({"message": dict(existing), "duplicate": True,
+                                "block_hash": existing["block_hash"],
+                                "block_index": existing["block_index"]}), 200
+
         # Atomically append a block for this message's hash. See
         # add_block() in supabase/schema.sql — a single locked
         # transaction, not a read-then-write from Python, so it is safe
@@ -100,16 +130,18 @@ def send_message():
             """
             INSERT INTO messages
                 (conversation_id, sender_id, encrypted_content, media_url,
-                 media_public_id, encrypted_media, block_index, block_hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                 media_public_id, encrypted_media, block_index, block_hash, client_message_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
                 conversation_id, g.profile["id"], encrypted_content, media_url,
-                media_public_id, encrypted_media, block["idx"], block["block_hash"],
+                media_public_id, encrypted_media, block["idx"], block["block_hash"], client_message_id,
             ),
         )
         message = cur.fetchone()
+        cur.execute("SELECT validate_message(%s) AS verified", (message["id"],))
+        message["verified"] = cur.fetchone()["verified"]
 
     # No Flask-side push needed: the `messages` table is registered with
     # Supabase Realtime (see schema.sql), so any client subscribed to
@@ -143,7 +175,7 @@ def get_messages(conversation_id):
         if before:
             cur.execute(
                 """
-                SELECT * FROM messages
+                SELECT m.*, validate_message(m.id) AS verified FROM messages m
                 WHERE conversation_id = %s AND created_at < %s
                 ORDER BY created_at DESC
                 LIMIT %s
@@ -153,7 +185,7 @@ def get_messages(conversation_id):
         else:
             cur.execute(
                 """
-                SELECT * FROM messages
+                SELECT m.*, validate_message(m.id) AS verified FROM messages m
                 WHERE conversation_id = %s
                 ORDER BY created_at DESC
                 LIMIT %s
@@ -168,11 +200,24 @@ def get_messages(conversation_id):
 @messages_bp.route("/verify/<int:conversation_id>", methods=["GET"])
 @require_auth
 def verify_conversation(conversation_id):
+    ids = None
+    if "message_ids" in request.args:
+        try:
+            ids = [int(v) for v in request.args["message_ids"].split(",")]
+            if not 1 <= len(ids) <= 200 or any(v <= 0 for v in ids):
+                raise ValueError
+        except ValueError:
+            return jsonify({"error": "message_ids must contain 1–200 positive message ids"}), 400
     with db_cursor() as cur:
         if not _is_participant(cur, conversation_id, g.profile["id"]):
             return jsonify({"error": "Not a participant in this conversation"}), 403
 
-        cur.execute("SELECT * FROM validate_conversation(%s)", (conversation_id,))
+        if ids is None:
+            cur.execute("SELECT * FROM validate_conversation(%s)", (conversation_id,))
+        else:
+            cur.execute("SELECT id AS message_id, validate_message(id) AS verified "
+                        "FROM messages WHERE conversation_id = %s AND id = ANY(%s) ORDER BY id",
+                        (conversation_id, ids))
         results = cur.fetchall()
 
     all_verified = all(row["verified"] for row in results) if results else True

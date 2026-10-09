@@ -33,14 +33,24 @@ def _as_str_list(value):
 @require_auth
 def create_conversation():
     data = request.get_json(silent=True) or {}
-    is_group = bool(data.get("is_group", False))
+    is_group = data.get("is_group", False)
     title = data.get("title")
     me = str(g.profile["id"])
+    if not isinstance(is_group, bool):
+        return jsonify({"error": "is_group must be a boolean"}), 400
+    if is_group:
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 80:
+            return jsonify({"error": "Group name must be between 1 and 80 characters"}), 400
+        title = title.strip()
+    else:
+        title = None
 
     raw_ids = _as_str_list(data.get("participant_ids"))
     raw_names = _as_str_list(data.get("participant_usernames"))
     if raw_ids is None or raw_names is None:
         return jsonify({"error": "participant_ids / participant_usernames must be lists of strings"}), 400
+    if len(raw_ids) + len(raw_names) > 49:
+        return jsonify({"error": "A group can have at most 50 members, including you"}), 400
 
     try:
         ids = {str(uuid.UUID(v)) for v in raw_ids}
@@ -64,6 +74,8 @@ def create_conversation():
             return jsonify({"error": "Choose at least one other user"}), 400
         if not is_group and len(ids) != 1:
             return jsonify({"error": "A direct conversation must have exactly one other participant"}), 400
+        if is_group and len(ids) < 2:
+            return jsonify({"error": "Choose at least two other users for a group"}), 400
 
         cur.execute(
             "SELECT id FROM profiles WHERE id = ANY(%s::uuid[]) AND status = 'active'",

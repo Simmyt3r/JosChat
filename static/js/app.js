@@ -87,6 +87,10 @@ let pendingFile = null;
 let pendingThumbUrl = null;
 let sending = false;
 let verifying = false;
+let autoVerifyTimer = null;
+let currentIsGroup = false;
+let queuedRows = [];
+let outboxRefreshing = null;
 let historyPushed = false;
 let lastRenderedCount = 0;
 let lastNetToast = 0;
@@ -228,6 +232,7 @@ function toggleTheme() {
 
 const AUTH_FIELDS = {
   username: { input: "username", msg: "username-msg" },
+  phone_number: { input: "phone-number", msg: "phone-msg" },
   email: { input: "email", msg: "email-msg" },
   password: { input: "password", msg: "password-msg" },
 };
@@ -260,6 +265,8 @@ function setMode(mode, opts = {}) {
   $("tab-login").tabIndex = register ? -1 : 0;
   $("tab-register").tabIndex = register ? 0 : -1;
   $("field-username").hidden = !register;
+  $("field-phone").hidden = !register;
+  $("phone-msg").dataset.hint = "Required for registration. Your number stays private.";
   $("password").autocomplete = register ? "new-password" : "current-password";
   $("password-msg").dataset.hint = register ? "At least 6 characters." : "";
   $("username-msg").dataset.hint = "3–30 characters: letters, numbers, _ . or -";
@@ -279,6 +286,7 @@ function validateAuthForm() {
     const username = $("username").value.trim();
     if (!username) errors.username = "Choose a username.";
     else if (!USERNAME_RE.test(username)) errors.username = "Use 3–30 letters, numbers, _ . or - (no spaces).";
+    if (!normalizePhone($("phone-number").value)) errors.phone_number = "Enter a Nigerian mobile number or an international number with country code.";
   }
   if (!email) errors.email = "Enter your email address.";
   else if (!EMAIL_RE.test(email)) errors.email = "That doesn't look like an email address.";
@@ -315,6 +323,7 @@ async function register() {
   const username = $("username").value.trim();
   const email = $("email").value.trim();
   const password = $("password").value;
+  const phone_number = normalizePhone($("phone-number").value);
 
   // Create this account's encryption key pair here, in the browser. Only the PUBLIC
   // half is sent; the private key is non-extractable and never leaves this device.
@@ -326,13 +335,14 @@ async function register() {
   const res = await fetch(`${API_BASE}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, email, password, public_key: keyPair ? keyPair.publicKey : undefined }),
+    body: JSON.stringify({ username, email, password, phone_number, public_key: keyPair ? keyPair.publicKey : undefined }),
   });
   const data = await readJson(res);
   if (!res.ok) {
     const message = data.error || "Registration failed.";
     if (res.status === 409 && /username/i.test(message)) setFieldError("username", message);
     else if (res.status === 409 && /email/i.test(message)) setFieldError("email", message);
+    else if (data.field === "phone_number" || /phone/i.test(message)) setFieldError("phone_number", message);
     else setAuthMessage(message);
     return;
   }
@@ -395,6 +405,7 @@ function applyToken() {
   // silently sent NO events. Must be repeated whenever the token changes.
   const client = ensureSupabaseClient();
   if (client) client.realtime.setAuth(accessToken);
+  if (currentProfile && accessToken) syncOutbox().catch(() => {});
 }
 
 async function startSession(data) {
@@ -441,13 +452,17 @@ async function createProfile(event) {
     return $("setup-username").focus();
   }
   setSetupError("");
+  const phone_number = normalizePhone($("setup-phone").value);
+  $("setup-phone-msg").textContent = phone_number ? "Your number stays private." : "Enter a Nigerian mobile number or an international number with country code.";
+  $("setup-phone").setAttribute("aria-invalid", String(!phone_number));
+  if (!phone_number) return $("setup-phone").focus();
   const btn = $("setup-btn");
   setBusy(btn, true);
   try {
     const res = await apiFetch("/auth/profile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username }),
+      body: JSON.stringify({ username, phone_number }),
     });
     if (!res) return;
     const data = await readJson(res);
@@ -514,7 +529,7 @@ async function apiFetch(path, options = {}) {
     try { res = await send(); } catch { return null; }
   }
   if (res.status === 401) {
-    signOut("Your session expired. Log in again to continue.");
+    signOut("Your session expired. Log in again to continue. Queued messages are retained.", { preserveQueue: true });
     return null;
   }
   return res;
@@ -544,8 +559,9 @@ async function restoreSession() {
   return false;
 }
 
-async function signOut(message) {
+async function signOut(message, { preserveQueue = false } = {}) {
   const token = accessToken;
+  const owner = currentProfile && currentProfile.id;
   closeConversation();
   teardownCall(null);
   unsubscribeFromIncomingCalls();
@@ -562,6 +578,11 @@ async function signOut(message) {
   mediaCache.clear();
   messageStatus.clear();
   drafts.clear();
+  queuedRows = [];
+  $("outbox-banner").hidden = true;
+  closeCallDialog("group-dialog");
+  // Clearing is per account; signing out cannot leak or replay its queue later.
+  if (owner && !preserveQueue) await outboxRequest("OUTBOX_CLEAR", { owner_id: owner }).catch(() => {});
   try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
   if (token) {
     // Best effort; the token may already be dead.
@@ -572,6 +593,83 @@ async function signOut(message) {
   $("chat-search").value = "";
   showView("auth");
   setMode("login", typeof message === "string" ? { keepMessage: { text: message, kind: "error" } } : {});
+}
+
+function normalizePhone(value) {
+  let number = String(value || "").replace(/[\s()\-]/g, "");
+  if (/^0[789][0-9]{9}$/.test(number)) number = "+234" + number.slice(1);
+  else if (number.startsWith("00")) number = "+" + number.slice(2);
+  return /^\+[1-9][0-9]{7,14}$/.test(number) ? number : null;
+}
+
+// Durable delivery is owned by the service worker, scoped to the signed-in account.
+function outboxRequest(type, detail = {}) {
+  const worker = navigator.serviceWorker && navigator.serviceWorker.controller;
+  const owner = detail.owner_id || (currentProfile && currentProfile.id);
+  if (!worker || !owner) return Promise.resolve({ rows: [] });
+  return new Promise((resolve, reject) => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => { channel.port1.close(); reject(new Error("Outbox unavailable")); }, 20000);
+    channel.port1.onmessage = ({ data }) => {
+      clearTimeout(timer); channel.port1.close();
+      if (data.error) reject(new Error(data.error)); else resolve(data);
+    };
+    worker.postMessage({ type, owner_id: owner, ...detail }, [channel.port2]);
+  });
+}
+function syncOutbox(retry = false) {
+  if (!currentProfile || !accessToken) return Promise.resolve();
+  if (outboxRefreshing) return outboxRefreshing;
+  const owner = currentProfile.id;
+  outboxRefreshing = outboxRequest("OUTBOX_SESSION", { access_token: accessToken, retry })
+    .then(({ rows }) => {
+      if (!currentProfile || currentProfile.id !== owner) return;
+      return displayOutbox(rows || []);
+    }).finally(() => { outboxRefreshing = null; });
+  return outboxRefreshing;
+}
+async function displayOutbox(rows) {
+  queuedRows = rows;
+  $("outbox-banner").hidden = rows.length === 0;
+  const needsAuth = rows.some((r) => r.status === "auth-required");
+  const failed = rows.some((r) => r.status === "failed");
+  $("outbox-text").textContent = `${rows.length} ${rows.length === 1 ? "message" : "messages"} ${needsAuth ? "waiting for sign-in" : failed ? "waiting for retry" : "queued"}.`;
+  const ids = new Set(rows.map((r) => r.client_message_id));
+  messageStore = messageStore.filter((m) => !m.queued || ids.has(m.client_message_id));
+  const pending = rows.filter((r) => r.payload.conversation_id === currentConversationId &&
+    !messageStore.some((m) => !m.queued && m.client_message_id === r.client_message_id)).map((r) => ({
+      ...r.payload, id: `queued:${r.client_message_id}`, sender_id: currentProfile.id,
+      created_at: r.created_at, queued: true, queue_status: r.status, queue_error: r.error,
+    }));
+  for (const msg of pending) {
+    const old = messageStore.find((m) => m.id === msg.id);
+    if (old) Object.assign(old, msg);
+  }
+  await addMessages(pending, { forceRender: true });
+}
+let outboxAuthInFlight = false;
+async function onOutboxMessage({ data }) {
+  if (!currentProfile || data.owner_id !== currentProfile.id) return;
+  if (data.type === "OUTBOX_SENT") {
+    queuedRows = queuedRows.filter((r) => r.client_message_id !== data.client_message_id);
+    messageStore = messageStore.filter((m) => !m.queued || m.client_message_id !== data.client_message_id);
+    if (data.message.conversation_id === currentConversationId) await addMessages([data.message], { forceStick: true });
+    await displayOutbox(queuedRows);
+  } else if (data.type === "OUTBOX_AUTH_REQUIRED" && !outboxAuthInFlight) {
+    outboxAuthInFlight = true;
+    try {
+      if (await refreshSession()) await syncOutbox();
+      else await signOut("Your session expired. Log in again to send your queued messages.", { preserveQueue: true });
+    } finally { outboxAuthInFlight = false; }
+  } else if (data.type === "OUTBOX_FAILED") {
+    toast(data.error || "A queued message could not be sent. Retry or remove it from the chat.", "error");
+    const result = await outboxRequest("OUTBOX_LIST");
+    await displayOutbox(result.rows || []);
+  }
+}
+async function discardQueuedMessage(id) {
+  const result = await outboxRequest("OUTBOX_DISCARD", { client_message_id: id });
+  await displayOutbox(result.rows || []);
 }
 
 // ---------------------------------------------------------------------------
@@ -679,7 +777,7 @@ function renderConversationList() {
 
   // "Start a chat with @name" appears when what was typed is a valid username
   // that doesn't already have a chat.
-  const hasExact = conversations.some((c) => (c.other_usernames || []).some((u) => u.toLowerCase() === q));
+  const hasExact = conversations.some((c) => !c.is_group && (c.other_usernames || []).some((u) => u.toLowerCase() === q));
   const isMe = currentProfile && currentProfile.username.toLowerCase() === q;
   const canStart = Boolean(q) && USERNAME_RE.test(raw) && !hasExact && !isMe;
   newRow.hidden = !canStart;
@@ -736,6 +834,30 @@ async function startChat(rawName) {
   }
 }
 
+async function createGroup(event) {
+  event.preventDefault();
+  const title = $("group-name").value.trim();
+  const names = [...new Set($("group-usernames").value.split(/[,\s]+/).map((n) => n.replace(/^@/, "")).filter(Boolean))]
+    .filter((n) => n !== currentProfile.username);
+  const showError = (message) => { $("group-error").textContent = message; $("group-error").hidden = false; };
+  if (!title || title.length > 80) return showError("Enter a group name (1–80 characters).");
+  if (names.length < 2 || names.length > 49) return showError("Add 2–49 other people by username.");
+  if (names.some((n) => !USERNAME_RE.test(n))) return showError("Use valid usernames, separated with commas or spaces.");
+  const btn = $("group-submit");
+  setBusy(btn, true); $("group-error").hidden = true;
+  try {
+    const res = await apiFetch("/conversations", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_group: true, title, participant_usernames: names }) });
+    if (!res) return showError("Could not reach Joschat. Reconnect and try again.");
+    const data = await readJson(res);
+    if (!res.ok) return showError(data.error || "Could not create the group.");
+    closeCallDialog("group-dialog");
+    await loadConversations();
+    await openConversation(data.conversation.id, title, title);
+    toast("Group created. Share the passphrase privately with your members.", "success");
+  } finally { setBusy(btn, false); }
+}
+
 function onSearchKeydown(event) {
   if (event.key === "Escape") {
     event.target.value = "";
@@ -746,7 +868,7 @@ function onSearchKeydown(event) {
   event.preventDefault();
   const raw = searchQuery();
   if (!raw) return;
-  const exact = (conversations || []).find((c) => (c.other_usernames || []).some((u) => u.toLowerCase() === raw.toLowerCase()));
+  const exact = (conversations || []).find((c) => !c.is_group && (c.other_usernames || []).some((u) => u.toLowerCase() === raw.toLowerCase()));
   if (exact) {
     openConversation(exact.id, conversationLabel(exact), conversationAvatarName(exact));
     $("chat-search").value = "";
@@ -1025,7 +1147,7 @@ async function computeKeyState() {
   const info = { state: "unsupported", key: null, decryptKeys: [], peerId: null,
                  peerFingerprint: null, newFingerprint: null, safety: null, newSafety: null };
   const ids = Object.keys(currentParticipants);
-  if (ids.length !== 2) return { ...info, state: "group" };
+  if (currentIsGroup || ids.length !== 2) return { ...info, state: "group" };
   if (myKeyStatus === "missing") return { ...info, state: "no-local-key" };
   if (myKeyStatus !== "ready") return info;
 
@@ -1273,8 +1395,8 @@ function updateLockUI() {
   } else {
     $("unlock-title").textContent = changing ? "Change the passphrase" : "This chat is locked";
     $("unlock-text").textContent = changing
-      ? "Enter the new passphrase you and " + otherName() + " agreed on. Messages written with a different passphrase stay locked."
-      : "Messages are encrypted on your device. Enter the passphrase you and " + otherName() + " agreed on. Share it outside Joschat.";
+      ? "Enter the new passphrase you and " + (currentIsGroup ? "the group members" : otherName()) + " agreed on. Messages written with a different passphrase stay locked."
+      : "Messages are encrypted on your device. Enter the passphrase you and " + (currentIsGroup ? "the group members" : otherName()) + " agreed on. Share it outside Joschat.";
     $("unlock-btn").querySelector(".btn-label").textContent = changing ? "Save passphrase" : "Unlock chat";
   }
   $("use-keys-btn").hidden = !(!keysMode && keyInfo && keyInfo.state === "ready");
@@ -1399,6 +1521,8 @@ async function openConversation(conversationId, label, avatarName) {
   convMode = "passphrase";
   currentParticipants = {};
   participantKeys = {};
+  currentIsGroup = false;
+  $("group-members").hidden = true;
 
   $("conv-title").textContent = label || `#${conversationId}`;
   paintAvatar($("thread-avatar"), avatarName || label);
@@ -1433,6 +1557,10 @@ async function openConversation(conversationId, label, avatarName) {
   if (!infoRes || currentConversationId !== conversationId) return;
   if (infoRes.ok) {
     const info = await infoRes.json();
+    currentIsGroup = Boolean(info.conversation && info.conversation.is_group);
+    $("group-members").hidden = !currentIsGroup;
+    $("group-members").textContent = `${info.participants.length} members · ${info.participants.map((p) => "@" + p.username).join(", ")}`;
+    $("group-members").title = $("group-members").textContent;
     for (const p of info.participants) {
       currentParticipants[p.user_id] = p.username;
       if (p.public_key) participantKeys[p.user_id] = p.public_key;
@@ -1460,6 +1588,9 @@ async function openConversation(conversationId, label, avatarName) {
   renderConversationList();
   await addMessages(data.messages, { forceStick: true, forceRender: true });
 
+  const pending = await outboxRequest("OUTBOX_LIST").catch(() => ({ rows: [] }));
+  if (currentConversationId !== conversationId) return;
+  await displayOutbox(pending.rows || []);
   subscribeToConversation(conversationId);
   startPolling(conversationId);
 
@@ -1470,6 +1601,7 @@ async function openConversation(conversationId, label, avatarName) {
 }
 
 function closeConversation() {
+  clearTimeout(autoVerifyTimer); autoVerifyTimer = null;
   if (currentConversationId !== null) drafts.set(currentConversationId, $("message-text").value);
   if (realtimeChannel && supabaseClient) supabaseClient.removeChannel(realtimeChannel);
   realtimeChannel = null;
@@ -1522,6 +1654,7 @@ function subscribeToConversation(conversationId) {
 function startPolling(conversationId) {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
+    if (!document.hidden && queuedRows.length) syncOutbox().catch(() => {});
     if (realtimeConnected || currentConversationId !== conversationId || document.hidden) return;
     refreshMessages();
   }, POLL_INTERVAL_MS);
@@ -1541,14 +1674,35 @@ async function refreshMessages() {
 // ---------------------------------------------------------------------------
 
 async function addMessages(messages, opts = {}) {
+  let changed = false;
+  for (const msg of messages) {
+    const old = messageStore.find((m) => m.id === msg.id);
+    if (old && !msg.queued) {
+      if (old.encrypted_content !== msg.encrypted_content || old.encrypted_media !== msg.encrypted_media) {
+        plainCache.delete(msg.id); mediaCache.delete(msg.id); messageStatus.delete(msg.id); changed = true;
+      }
+      Object.assign(old, msg);
+    }
+    if (typeof msg.verified === "boolean") {
+      const status = msg.verified ? "verified" : "tampered";
+      if (messageStatus.get(msg.id) !== status) changed = true;
+      messageStatus.set(msg.id, status);
+    }
+  }
   const known = new Set(messageStore.map((m) => m.id));
   const fresh = messages.filter((m) => !known.has(m.id));
-  if (!fresh.length && !opts.forceRender) return;
+  if (!fresh.length && !opts.forceRender && !changed) return;
   if (fresh.length && !opts.forceRender && !verifying) $("verify-banner").hidden = true;
+  const delivered = new Set(fresh.filter((m) => !m.queued).map((m) => m.client_message_id).filter(Boolean));
+  messageStore = messageStore.filter((m) => !m.queued || !delivered.has(m.client_message_id));
   messageStore.push(...fresh);
-  messageStore.sort((a, b) => a.id - b.id);
+  for (const msg of messages) {
+    if (typeof msg.verified === "boolean") messageStatus.set(msg.id, msg.verified ? "verified" : "tampered");
+  }
+  messageStore.sort((a, b) => a.queued && b.queued ? a.created_at.localeCompare(b.created_at) : a.queued ? 1 : b.queued ? -1 : a.id - b.id);
   const sentByMe = fresh.some((m) => currentProfile && m.sender_id === currentProfile.id);
   await renderAllMessages({ forceStick: Boolean(opts.forceStick) || sentByMe });
+  scheduleAutoVerification();
 }
 
 function scrollToBottom() {
@@ -1587,7 +1741,7 @@ async function renderAllMessages({ forceStick = false } = {}) {
   const wrap = $("messages-wrap");
   const wasNearBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 96;
   const isFirst = lastRenderedCount === 0;
-  const isGroup = Object.keys(currentParticipants).length > 2;
+  const isGroup = currentIsGroup || Object.keys(currentParticipants).length > 2;
 
   const frag = document.createDocumentFragment();
   messageStore.forEach((msg, i) => {
@@ -1626,14 +1780,19 @@ async function renderAllMessages({ forceStick = false } = {}) {
 const SEAL_MARKUP =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon class="hex" points="12,2.5 20.5,7.25 20.5,16.75 12,21.5 3.5,16.75 3.5,7.25"/><polyline class="tick" points="8,12.3 11,15 16,9.3"/><path class="bang" d="M12 7.6v5M12 15.9v.01"/></svg>';
 const SEAL_STATE_TEXT = {
-  sealed: "sealed in the chain",
+  sealed: "awaiting an online integrity check",
+  queued: "queued on this device",
+  failed: "could not be sent",
+  "auth-required": "waiting for sign-in",
   verified: "verified",
   tampered: "failed verification and may have been changed",
 };
 
 function describeSeal(seal, state, blockIndex) {
   seal.dataset.state = state;
-  seal.setAttribute("aria-label", `Block ${blockIndex}, ${SEAL_STATE_TEXT[state]}. Show details.`);
+  const labels = { sealed: "Not verified", verified: "Verified", tampered: "Failed verification", queued: "Queued", failed: "Send failed", "auth-required": "Sign in to send" };
+  seal.querySelector(".seal-label").textContent = labels[state] || "Not verified";
+  seal.setAttribute("aria-label", `${blockIndex == null ? "Message" : "Block " + blockIndex}, ${SEAL_STATE_TEXT[state]}. ${blockIndex == null ? "" : "Show details."}`);
 }
 
 function buildSeal(msg, expanded) {
@@ -1642,8 +1801,9 @@ function buildSeal(msg, expanded) {
   seal.className = "seal";
   seal.dataset.msgId = msg.id;
   seal.setAttribute("aria-expanded", String(expanded));
-  seal.innerHTML = SEAL_MARKUP;   // static markup, no user data
-  describeSeal(seal, messageStatus.get(msg.id) || "sealed", msg.block_index);
+  seal.innerHTML = SEAL_MARKUP + '<span class="seal-label"></span>';   // static markup, no user data
+  describeSeal(seal, msg.queued ? msg.queue_status : messageStatus.get(msg.id) || "sealed", msg.block_index);
+  seal.disabled = Boolean(msg.queued);
   return seal;
 }
 
@@ -1702,13 +1862,20 @@ function buildMessageItem(msg, contPrev, contNext, isGroup) {
 
   const info = document.createElement("div");
   info.className = "block-info";
-  info.hidden = !expandedBlocks.has(msg.id);
+  info.hidden = msg.queued || !expandedBlocks.has(msg.id);
   info.append(document.createTextNode(`Block #${msg.block_index}`));
   const code = document.createElement("code");
   code.textContent = String(msg.block_hash);
   info.appendChild(code);
   bubble.appendChild(info);
 
+  if (msg.queued) {
+    const remove = document.createElement("button");
+    remove.type = "button"; remove.className = "queued-remove"; remove.textContent = "Remove queued message";
+    remove.addEventListener("click", () => discardQueuedMessage(msg.client_message_id).catch(() => toast("Could not remove queued message.", "error")));
+    bubble.appendChild(remove);
+    if (msg.queue_error) { const error = document.createElement("p"); error.textContent = msg.queue_error; error.className = "msg-text is-failed"; bubble.appendChild(error); }
+  }
   li.appendChild(bubble);
   return li;
 }
@@ -1833,6 +2000,7 @@ async function sendMessage() {
 
   const text = $("message-text").value.trim();
   if (!text && !pendingFile) return;
+  if (pendingFile && navigator.onLine === false) return toast("Attachments need a connection. Send text now or reconnect to upload the file.", "error");
 
   sending = true;
   const sendBtn = $("send-btn");
@@ -1867,27 +2035,44 @@ async function sendMessage() {
     }
 
     const encrypted_content = await seal(text || "(attachment)");
+    const client_message_id = crypto.randomUUID();
+    const senderId = currentProfile.id;
 
     const res = await apiFetch("/messages/send", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Joschat-Owner": senderId },
       body: JSON.stringify({
         conversation_id: conversationId,
         encrypted_content,
         encrypted_media,
+        client_message_id,
       }),
     });
     if (!res) return;
     const data = await readJson(res);
     if (!res.ok) return toast(`Message not sent: ${data.error}`, "error");
 
-    $("message-text").value = "";
+    if (currentConversationId === conversationId) {
+      $("message-text").value = "";
+      autosizeComposer(); clearAttachment();
+    }
     drafts.delete(conversationId);
-    autosizeComposer();
-    clearAttachment();
+    if (data.queued) {
+      if (currentConversationId === conversationId && !messageStore.some((m) => m.client_message_id === client_message_id && !m.queued)) {
+        const queued = { client_message_id, payload: { conversation_id: conversationId, encrypted_content, encrypted_media, client_message_id },
+          created_at: data.created_at || new Date().toISOString(), status: "queued" };
+        plainCache.set(`queued:${client_message_id}`, text || "(attachment)");
+        await displayOutbox([...queuedRows.filter((r) => r.client_message_id !== client_message_id), queued]);
+      }
+      toast("Message queued. It will send when you reconnect.");
+      return;
+    }
     // Show it immediately; the Realtime/poll copy of the same row is
     // de-duplicated by id, so it never appears twice.
     if (currentConversationId === conversationId) await addMessages([data.message], { forceStick: true });
+  } catch (err) {
+    console.error(err);
+    toast("Message not sent. Your draft is still here; check your connection and try again.", "error");
   } finally {
     sending = false;
     sendBtn.classList.remove("is-busy");
@@ -1908,28 +2093,41 @@ function showVerifyBanner(text, bad) {
   banner.hidden = false;
 }
 
-async function verifyChain() {
+function scheduleAutoVerification() {
+  clearTimeout(autoVerifyTimer);
+  if (!currentConversationId || navigator.onLine === false || !messageStore.some((m) => !m.queued && !messageStatus.has(m.id))) return;
+  autoVerifyTimer = setTimeout(() => verifyChain({ automatic: true }), 200);
+}
+
+async function verifyChain({ automatic = false } = {}) {
   if (!currentConversationId || verifying) return;
   const conversationId = currentConversationId;
   verifying = true;
+  let checkedMessages = 0;
   const btn = $("verify-btn");
-  setBusy(btn, true);
-  btn.querySelector(".btn-label").textContent = "Verifying…";
-  $("verify-banner").hidden = true;
+  if (!automatic) {
+    setBusy(btn, true);
+    btn.querySelector(".btn-label").textContent = "Verifying…";
+    $("verify-banner").hidden = true;
+  }
 
   try {
-    const res = await apiFetch(`/messages/verify/${conversationId}`);
+    const ids = automatic ? messageStore.filter((m) => !m.queued && !messageStatus.has(m.id)).slice(0, 200).map((m) => m.id) : [];
+    const res = await apiFetch(`/messages/verify/${conversationId}${automatic ? "?message_ids=" + ids.join(",") : ""}`);
     if (!res) return;
     const data = await readJson(res);
-    if (!res.ok) return toast(data.error || "Couldn't verify this chat.", "error");
+    if (!res.ok) {
+      if (!automatic) toast(data.error || "Couldn't verify this chat.", "error");
+      return;
+    }
     if (currentConversationId !== conversationId) return;
 
     const outcome = (data.results || []).map((r) => [Number(r.message_id), Boolean(r.verified)]);
-    if (!outcome.length) return showVerifyBanner("Nothing to verify yet. Send a message first.", false);
+    if (!outcome.length) { if (!automatic) showVerifyBanner("Nothing to verify yet. Send a message first.", false); return; }
 
     // One seal at a time, oldest first. The sweep IS the feedback: it shows
     // which messages were checked and what each one turned out to be.
-    const step = reduceMotion ? 0 : Math.max(10, Math.min(70, Math.floor(1500 / outcome.length)));
+    const step = automatic || reduceMotion ? 0 : Math.max(10, Math.min(70, Math.floor(1500 / outcome.length)));
     let bad = 0;
     for (const [id, ok] of outcome) {
       if (currentConversationId !== conversationId) return;
@@ -1948,12 +2146,13 @@ async function verifyChain() {
     }
 
     const total = outcome.length;
-    if (bad === 0) {
+    checkedMessages = total;
+    if (bad === 0 && !automatic) {
       showVerifyBanner(
-        total === 1 ? "The message is verified. Nothing has been changed." : `All ${total} messages are verified. Nothing has been changed.`,
+        total === 1 ? "The message passed its integrity check." : `All ${total} messages passed their integrity checks.`,
         false
       );
-    } else {
+    } else if (bad) {
       showVerifyBanner(
         `${bad} of ${total} ${total === 1 ? "message" : "messages"} failed verification and may have been changed after sending.`,
         true
@@ -1961,8 +2160,12 @@ async function verifyChain() {
     }
   } finally {
     verifying = false;
-    setBusy(btn, false);
-    btn.querySelector(".btn-label").textContent = "Verify chat";
+    if (!automatic) {
+      setBusy(btn, false);
+      btn.querySelector(".btn-label").textContent = "Verify chat";
+    }
+    // Only reschedule after a successful check; an outage must not cause a loop.
+    if (checkedMessages && currentConversationId === conversationId && messageStore.some((m) => !m.queued && !messageStatus.has(m.id))) scheduleAutoVerification();
   }
 }
 
@@ -2016,6 +2219,16 @@ function bindEvents() {
   $("setup-signout").addEventListener("click", () => signOut());
 
   // Sidebar
+  $("new-group-btn").addEventListener("click", () => {
+    $("group-form").reset(); $("group-error").hidden = true; openCallDialog("group-dialog"); $("group-name").focus();
+  });
+  $("group-form").addEventListener("submit", createGroup);
+  $("group-cancel").addEventListener("click", () => closeCallDialog("group-dialog"));
+  $("outbox-retry").addEventListener("click", () => syncOutbox(true).catch(() => toast("Could not retry queued messages.", "error")));
+  if (navigator.serviceWorker) {
+    navigator.serviceWorker.addEventListener("message", (event) => onOutboxMessage(event).catch(console.error));
+    navigator.serviceWorker.addEventListener("controllerchange", () => syncOutbox().catch(() => {}));
+  }
   $("theme-btn").addEventListener("click", toggleTheme);
   $("signout-btn").addEventListener("click", () => signOut());
   $("chat-search").addEventListener("input", onSearchInput);
@@ -2029,7 +2242,7 @@ function bindEvents() {
 
   // Thread
   $("back-btn").addEventListener("click", onBackButton);
-  $("verify-btn").addEventListener("click", verifyChain);
+  $("verify-btn").addEventListener("click", () => verifyChain());
   $("verify-dismiss").addEventListener("click", () => { $("verify-banner").hidden = true; });
   $("lock-btn").addEventListener("click", onLockButton);
   $("use-keys-btn").addEventListener("click", () => useMode("keys"));
@@ -2099,11 +2312,19 @@ function bindEvents() {
   window.addEventListener("offline", () => { $("net-banner").hidden = false; });
   window.addEventListener("online", () => {
     $("net-banner").hidden = true;
-    if (accessToken) { loadConversations(); refreshMessages(); }
+    if (accessToken) { loadConversations(); refreshMessages(); syncOutbox().catch(() => {}); scheduleAutoVerification(); }
   });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && accessToken && currentConversationId !== null && !realtimeConnected) refreshMessages();
+    if (!document.hidden && accessToken) {
+      syncOutbox().catch(() => {});
+      if (currentConversationId !== null && !realtimeConnected) refreshMessages();
+    }
   });
+  setInterval(() => {
+    if (document.hidden || !accessToken || navigator.onLine === false) return;
+    loadConversations();
+    if (queuedRows.length) syncOutbox().catch(() => {});
+  }, 30000);
   if (navigator.onLine === false) $("net-banner").hidden = false;
 }
 

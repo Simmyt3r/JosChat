@@ -141,7 +141,7 @@ def new_page(browser, **kw):
 
 def register(pg, username):
     pg.goto(BASE); pg.wait_for_selector("#auth-view:not([hidden])"); pg.click("#tab-register")
-    pg.fill("#username", username); pg.fill("#email", f"{username}@x.com"); pg.fill("#password", "secret12"); pg.click("#submit-btn")
+    pg.fill("#username", username); pg.fill("#phone-number", "09039930006"); pg.fill("#email", f"{username}@x.com"); pg.fill("#password", "secret12"); pg.click("#submit-btn")
     pg.wait_for_selector("#chat-shell:not([hidden])"); pg.wait_for_selector(".conv, .side-empty")
     pg.wait_for_function("myKeyStatus === 'ready'")
 

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from blockchain import Block
+from blockchain import Block, hash_message
 
 psycopg2 = pytest.importorskip("psycopg2")
 
@@ -55,7 +55,7 @@ def _conversation(db):
 
 def _send(db, conv, sender, ciphertext="c"):
     """What routes/messages.py does: chain a block, then store the message row."""
-    db.execute("select idx, block_hash from add_block(%s, %s, %s)", ("h-" + ciphertext, sender, conv))
+    db.execute("select idx, block_hash from add_block(%s, %s, %s)", (hash_message(ciphertext), sender, conv))
     idx, block_hash = db.fetchone()
     db.execute(
         "insert into messages(conversation_id, sender_id, encrypted_content, block_index, block_hash) "
@@ -99,6 +99,31 @@ def test_conversation_verification_flags_tampered_block(db):
     db.execute("update blocks set message_hash = 'TAMPERED' where index = %s", (idx,))
     db.execute("select verified from validate_conversation(%s)", (conv,))
     assert db.fetchone() == (False,)
+
+
+def test_ciphertext_tampering_is_detected_without_touching_the_block(db):
+    conv = _conversation(db)
+    msg_id, _ = _send(db, conv, U1)
+    assert _flagged(db, conv) == []
+    db.execute("update messages set encrypted_content = 'changed' where id = %s", (msg_id,))
+    assert _flagged(db, conv) == [msg_id]
+
+
+def test_changing_the_stored_block_hash_is_detected(db):
+    conv = _conversation(db)
+    msg_id, idx = _send(db, conv, U1)
+    db.execute("update blocks set block_hash = 'changed' where index = %s", (idx,))
+    assert _flagged(db, conv) == [msg_id]
+
+
+def test_message_client_id_is_unique_per_sender(db):
+    conv = _conversation(db)
+    msg_id, _ = _send(db, conv, U1)
+    other_id, _ = _send(db, conv, U1, 'other')
+    client_id = '33333333-3333-3333-3333-333333333333'
+    db.execute("update messages set client_message_id = %s where id = %s", (client_id, msg_id))
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        db.execute("update messages set client_message_id = %s where id = %s", (client_id, other_id))
 
 
 # --- blocks record the sender and the conversation ---------------------------

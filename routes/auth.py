@@ -8,12 +8,12 @@ and JWT issuance correctly). The resulting `profiles` row, however, is
 read/written with a direct Postgres query, same as every other table in
 this app.
 
-POST /api/auth/register  { username, email, password, phone_number?, public_key? }
+POST /api/auth/register  { username, email, password, phone_number, public_key? }
 POST /api/auth/login     { email, password }
 POST /api/auth/refresh   { refresh_token }
 POST /api/auth/logout    (Authorization: Bearer <token>)
 GET  /api/auth/me        (Authorization: Bearer <token>)
-POST /api/auth/profile   { username, phone_number?, public_key? }  (token only)
+POST /api/auth/profile   { username, phone_number, public_key? }  (token only)
 PUT  /api/auth/public-key { public_key }  (Authorization: Bearer <token>)
 
 `public_key` is the account's end-to-end encryption PUBLIC key: base64 of an
@@ -42,6 +42,7 @@ from flask import Blueprint, request, jsonify, g
 from extensions import get_supabase_auth, db_cursor, SupabaseAuthError
 from utils.auth_helpers import require_auth, require_token
 from utils.keys import validate_public_key
+from utils.phone import normalize_phone
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -101,7 +102,7 @@ def register():
     username = (data.get("username") or "").strip()
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
-    phone_number = (data.get("phone_number") or "").strip() or None
+    phone_number, phone_error = normalize_phone(data.get("phone_number"), required=True)
     public_key, key_error = validate_public_key(data.get("public_key"))  # client-generated E2EE public key
 
     if not username or not email or not password:
@@ -118,6 +119,8 @@ def register():
         return jsonify({"error": "password must be at least 6 characters"}), 400
     if key_error:
         return jsonify({"error": key_error}), 400
+    if phone_error:
+        return jsonify({"error": phone_error, "field": "phone_number"}), 400
 
     with db_cursor() as cur:
         cur.execute("SELECT id FROM profiles WHERE username = %s", (username,))
@@ -242,8 +245,10 @@ def create_profile():
     """Finish setup for an authenticated account that has no profile row."""
     data = request.get_json(silent=True) or {}
     username = (data.get("username") or "").strip()
-    phone_number = (data.get("phone_number") or "").strip() or None
+    phone_number, phone_error = normalize_phone(data.get("phone_number"), required=True)
     public_key, key_error = validate_public_key(data.get("public_key"))
+    if phone_error:
+        return jsonify({"error": phone_error, "field": "phone_number"}), 400
 
     error = _validate_username(username) or key_error
     if error:

@@ -37,7 +37,7 @@ class FakeAuth:
 @pytest.fixture()
 def send(monkeypatch, client):
     def _send(body, rows=None):
-        rows = rows if rows is not None else [(1,), {"idx": 7, "block_hash": "h" * 64}, {"id": 1, "conversation_id": 42}]
+        rows = rows if rows is not None else [(1,), {"idx": 7, "block_hash": "h" * 64}, {"id": 1, "conversation_id": 42}, {"verified": True}]
         route_cursors = []
 
         @contextmanager

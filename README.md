@@ -1,7 +1,7 @@
 # Joschat — Flask API (Supabase + Cloudinary + Vercel)
 
 Secured messaging and calling backend for the Joschat project. Message
-integrity is guaranteed by an append-only, SHA-256 hash chain ("blockchain
+integrity is checked against an append-only, SHA-256 hash chain ("blockchain
 layer") implemented as atomic Postgres functions inside Supabase.
 
 ## Architecture at a glance
@@ -85,7 +85,7 @@ JosChat/
 └── static/
     ├── js/app.js                 Demo client (auth, chats, messaging; calling is a sketch)
     ├── manifest.json              PWA manifest
-    └── sw.js                       Service worker (served at /sw.js; network-first)
+    └── sw.js                       Service worker (shell caching + encrypted IndexedDB outbox)
 ```
 
 ## Setup
@@ -219,10 +219,10 @@ and Preview, then redeploy.
 |---|---|---|---|
 | GET | `/api/health` | – | Liveness check |
 | GET | `/api/config` | – | Public Supabase URL/anon key for the frontend |
-| POST | `/api/auth/register` | – | `{username, email, password, phone_number?, public_key?}` |
+| POST | `/api/auth/register` | – | `{username, email, password, phone_number, public_key?}` |
 | POST | `/api/auth/login` | – | `{email, password}` → `{access_token, refresh_token, profile}` (`profile` is `null` if the account has no profile row yet) |
 | POST | `/api/auth/refresh` | – | `{refresh_token}` → a fresh `{access_token, refresh_token, profile}` |
-| POST | `/api/auth/profile` | Bearer | `{username, phone_number?}` — create the profile row for an account that has none |
+| POST | `/api/auth/profile` | Bearer | `{username, phone_number}` — create the profile row for an account that has none |
 | PUT | `/api/auth/public-key` | Bearer | `{public_key}` — set or replace your own end-to-end encryption public key (base64 of an uncompressed P-256 point; anything else, including a private key, is rejected) |
 | POST | `/api/auth/logout` | Bearer | Invalidate the current session |
 | GET | `/api/auth/me` | Bearer | Current user's profile |
@@ -339,3 +339,65 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   (e.g. via Twilio or a self-hosted coturn instance) as a fallback. Calling
   also depends on the same Realtime connection messaging does — see the
   "What the browser can do" note above.
+
+
+## Messaging completion (October 2026)
+
+- **Automatic Verified badges:** message history and send responses include a
+  server-computed integrity result. Realtime inserts are checked automatically
+  in batches; Verify chat remains a manual recheck. Verification compares the
+  current ciphertext with its recorded SHA-256 digest, checks sender and
+  conversation binding, recomputes the block, and checks its predecessor link.
+  A green badge confirms message integrity against the server ledger, not the
+  sender's real-world identity or the truth of the text. Legacy blocks lacking
+  sender/conversation fields retain their original hash format.
+- **Groups:** choose New group, enter a name and 2–49 other usernames. The creator
+  is included automatically. Members appear in the thread header, and received
+  messages display their sender. Groups use the existing shared-passphrase
+  encryption. Share that phrase privately; one-to-one secure-key encryption and
+  calls keep working for direct chats. Member changes/group calls are not part
+  of this release.
+- **Phone registration:** new accounts and missing-profile setup require a phone
+  number. Nigerian mobile format (`09039930006`) and country-code formats are
+  normalized to E.164 (`+2349039930006`) before uniqueness checks and storage.
+  Existing accounts do not need a backfill. Phone numbers remain private under
+  the existing column privileges; this collects contact details without SMS OTP
+  verification and does not replace email/password login.
+- **Offline outbox:** an already opened/unlocked chat can queue text messages.
+  The service worker durably stores ciphertext, owner id, stable client message
+  UUID, and an expiring access token in IndexedDB; plaintext, private keys and
+  refresh tokens are never stored in the outbox. Queued items show their status
+  and can be removed. Supported browsers retry through Background Sync; others
+  retry on reconnect, foregrounding the app, and every 30 seconds while visible.
+  Attachments must upload online first. Only the public shell/static assets are
+  cached, never API responses or admin pages. Offline history/reopening locked
+  chats still needs a connection. HTTP 401 pauses delivery until the app refreshes
+  the session or the owner logs in again. Explicit Sign out discards that owner's
+  remaining queue; automatic session expiry retains it for reauthentication.
+- **Safe replay:** `/api/messages/send` accepts `client_message_id` (UUID). A
+  transaction advisory lock and sender/id unique index return the original row
+  on retry, including after a response is lost, without creating another block.
+  Reusing an id with a different message returns 409. Older clients can still
+  send without this optional field.
+
+### Upgrade before deploying the new API
+
+Run `supabase/migrations/20261009061012_message_delivery.sql` against the existing
+Joschat database, or rerun `supabase/schema.sql`. Both preserve existing messages
+and ledger entries. Apply the upgrade **before** deploying the new API, because
+history/send routes now use `validate_message()` and `client_message_id`.
+The incremental file is for an already initialized database; use the complete
+schema on a fresh project. No environment changes are required.
+
+### Validation
+
+`pytest -q` covers registration, groups, retry safety and existing API behavior.
+With a disposable `TEST_DATABASE_URL`, it also exercises actual Postgres integrity
+functions, upgrade idempotence, RLS and private phone-column access.
+`node --test tests/js/crypto.test.js` covers encryption and tamper detection.
+`python tests/e2e/run_messaging_ui.py` runs Chromium with the real service worker
+and IndexedDB, plus an in-memory API fixture: group decryption, automatic badges,
+offline persistence across reload, reconnect delivery, lost-response retries,
+token refresh, tamper badges, logout cleanup and mobile overflow. It requires
+`pip install playwright==1.55.0` and `playwright install chromium --with-deps`.
+No test accesses live accounts or messages.

@@ -106,7 +106,7 @@ def wired(monkeypatch):
 
 
 def _register(client, **extra):
-    body = {"username": "alice", "email": "alice@example.com", "password": "secret1", **extra}
+    body = {"username": "alice", "email": "alice@example.com", "password": "secret1", "phone_number": "09039930006", **extra}
     return client.post("/api/auth/register", json=body)
 
 
