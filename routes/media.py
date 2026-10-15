@@ -15,14 +15,32 @@ does not itself encrypt anything — it only handles storage.
 """
 
 import uuid
+import time
 from flask import Blueprint, request, jsonify, g
 import cloudinary.uploader
+import cloudinary.utils
 
 from config import Config
 from extensions import db_cursor
 from utils.auth_helpers import require_auth
 
 media_bp = Blueprint("media", __name__)
+
+
+@media_bp.route("/sign-upload", methods=["POST"])
+@require_auth
+def sign_upload():
+    data = request.get_json(silent=True) or {}
+    cid = data.get("conversation_id")
+    if type(cid) is not int or cid < 1:
+        return jsonify({"error": "A conversation_id is required"}), 400
+    if not _is_participant(cid, g.profile["id"]):
+        return jsonify({"error": "Not a participant in this conversation"}), 403
+    fields = {"timestamp": str(int(time.time())),
+              "public_id": f"joschat/{cid}/{uuid.uuid4().hex}.jcm", "overwrite": "false"}
+    signature = cloudinary.utils.api_sign_request(fields, Config.CLOUDINARY_API_SECRET)
+    return jsonify({"upload_url": f"https://api.cloudinary.com/v1_1/{Config.CLOUDINARY_CLOUD_NAME}/raw/upload",
+                    "fields": {**fields, "api_key": Config.CLOUDINARY_API_KEY, "signature": signature}})
 
 
 def _is_participant(conversation_id, user_id) -> bool:

@@ -275,12 +275,13 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   (long-lived keys); and keys belong to one browser, so a new device must set up new
   keys and cannot read messages sealed to the old one.
 - **Encrypted media**: new attachment bytes are encrypted on the sender's device
-  with a random AES-256-GCM file key before upload. Cloudinary receives a raw
+  with a random AES-256-GCM file key before upload. A membership-scoped signed
+  direct upload bypasses Vercel's function request-body limit; Cloudinary receives a raw
   `JCM1` encrypted container. The file key, digest, original name and type are
   sealed inside `encrypted_media`. Recipients check the trusted storage origin,
   ciphertext digest, authenticated sender/conversation binding and original size,
   then render a local blob URL. New plaintext uploads/attachment links are rejected.
-  The client limits files to 24 MB to leave room for encryption and upload framing.
+  The client ceiling is 24 MB; Cloudinary's account/plan limits may be lower.
   Historical attachments remain readable and explicitly carry a legacy warning;
   their original uploaded bytes cannot be retroactively encrypted without a key holder.
 - **Blockchain decentralisation**: the chain is a single, private,
@@ -445,6 +446,7 @@ Additional authenticated APIs:
 
 | Method | Route | Purpose |
 | --- | --- | --- |
+| POST | `/api/media/sign-upload` | Authorize an encrypted direct upload for a conversation member |
 | PATCH | `/api/auth/profile` | Change username/private phone; role cannot be changed |
 | PATCH | `/api/conversations/<id>` | Rename, add, remove, or leave a group |
 | GET | `/api/calls/ice` | STUN/TURN configuration and temporary relay credentials |

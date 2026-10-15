@@ -104,6 +104,7 @@ def fixture_api():
         if u["id"] not in c["members"]:return jsonify({"error":"Not a member"}),403
         return jsonify({"conversation": c, "participants": [{"user_id": p["id"], "username": p["username"], "public_key": p.get("public_key")}
                         for p in USERS.values() if p["id"] in c["members"]]})
+    if path == "/api/media/sign-upload": return jsonify({"upload_url":"https://api.cloudinary.com/v1_1/demo/raw/upload","fields":{"timestamp":"1","public_id":"test.jcm","signature":"fixture","api_key":"fixture"}})
     if path == "/api/media/upload":
         file=request.files["file"]; body=file.read(); name=uuid.uuid4().hex+".jcm"; MEDIA[name]=body
         assert body.startswith(b"JCM1") and request.form["encrypted"]=="1"

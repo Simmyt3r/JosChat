@@ -240,3 +240,18 @@ def test_push_retries_are_protected_and_failures_stay_durable(api,db,client,monk
     assert response.status_code==200 and response.get_json()['sent']==1
     db.execute('select count(*) from private.push_deliveries')
     assert db.fetchone()[0]==0
+
+
+def test_signed_upload_is_scoped_and_does_not_expose_secret(api,db):
+    import cloudinary.utils
+    c=_conversation(db)
+    result=api('post','/api/media/sign-upload',{'conversation_id':c})
+    assert result.status_code==200
+    payload=result.get_json();fields=dict(payload['fields']);signature=fields.pop('signature');fields.pop('api_key')
+    assert payload['upload_url']=='https://api.cloudinary.com/v1_1/demo/raw/upload'
+    assert fields['public_id'].startswith(f'joschat/{c}/') and fields['public_id'].endswith('.jcm')
+    assert fields['overwrite']=='false'
+    assert signature==cloudinary.utils.api_sign_request(fields,Config.CLOUDINARY_API_SECRET)
+    assert Config.CLOUDINARY_API_SECRET not in json.dumps(payload)
+    db.execute('delete from conversation_participants where user_id=%s',(U2,))
+    assert api('post','/api/media/sign-upload',{'conversation_id':c},user=U2).status_code==403

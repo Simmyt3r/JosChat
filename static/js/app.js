@@ -2076,14 +2076,18 @@ async function sendMessage() {
     if (pendingFile) {
       const file = pendingFile;
       const sealed = await JC.encryptAttachment(await file.arrayBuffer(), conversationId, currentProfile.id);
+      const signRes = await apiFetch("/media/sign-upload", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({conversation_id:conversationId}) });
+      if (!signRes) return;
+      const signed = await readJson(signRes);
+      if (!signRes.ok) return toast(signed.error || "Could not prepare the encrypted upload.", "error");
+      const expected = `https://api.cloudinary.com/v1_1/${supabaseConfig.cloudinary_cloud_name}/raw/upload`;
+      if (signed.upload_url !== expected) throw new Error("Untrusted upload destination");
       const form = new FormData();
       form.append("file", new Blob([sealed.bytes], { type: "application/octet-stream" }), "attachment.jcm");
-      form.append("encrypted", "1");
-      form.append("conversation_id", conversationId);
-      const uploadRes = await apiFetch("/media/upload", { method: "POST", body: form });
-      if (!uploadRes) return;
+      for (const [name,value] of Object.entries(signed.fields)) form.append(name,String(value));
+      const uploadRes = await fetch(signed.upload_url, { method: "POST", body: form, credentials: "omit", referrerPolicy: "no-referrer" });
       const uploadData = await readJson(uploadRes);
-      if (!uploadRes.ok) return toast(`Upload failed: ${uploadData.error}`, "error");
+      if (!uploadRes.ok) return toast(uploadData.error?.message || "Upload failed. Check your connection and the storage file-size limit.", "error");
       encrypted_media = await seal(JSON.stringify({
         version: 1, url: uploadData.secure_url, public_id: uploadData.public_id,
         key: sealed.key, digest: sealed.digest, name: file.name, type: file.type, size: file.size,

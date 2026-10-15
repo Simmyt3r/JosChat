@@ -11,10 +11,21 @@ import statistics
 import threading
 import time
 import uuid
+from email.parser import BytesParser
+from email.policy import default
 
 from run_messaging_ui import app, BASE, USERS, CONVS, MESSAGES, MEDIA, register, unlock, send
 from playwright.sync_api import sync_playwright
 from werkzeug.serving import make_server
+
+
+def storage_upload(route):
+    request=route.request
+    data=BytesParser(policy=default).parsebytes(("Content-Type: "+request.headers["content-type"]+"\r\nMIME-Version: 1.0\r\n\r\n").encode()+request.post_data_buffer)
+    content=next(part.get_payload(decode=True) for part in data.iter_parts() if part.get_param('name',header='content-disposition')=='file')
+    assert content.startswith(b'JCM1')
+    name=uuid.uuid4().hex+'.jcm';MEDIA[name]=content
+    route.fulfill(json={"secure_url":"https://res.cloudinary.com/demo/raw/upload/"+name,"public_id":"joschat/1/"+name},headers={"Access-Control-Allow-Origin":"*"})
 
 
 def main():
@@ -30,6 +41,7 @@ def main():
             for pg in (alice,bob):
                 pg.on("pageerror",lambda e:errors.append(str(e)))
                 pg.route("https://**",lambda r:r.abort())
+                pg.route("https://api.cloudinary.com/v1_1/demo/raw/upload",storage_upload)
                 pg.route("https://res.cloudinary.com/demo/raw/upload/**",lambda r:r.fulfill(body=MEDIA[r.request.url.rsplit('/',1)[1]],headers={"Access-Control-Allow-Origin":"*"},content_type="application/octet-stream"))
             register(alice,"alice");register(bob,"bob")
             USERS['carol@example.com']={'id':str(uuid.uuid4()),'username':'carol','phone_number':'+2348000000001'}
