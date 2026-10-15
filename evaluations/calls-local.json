@@ -1,0 +1,10 @@
+{
+  "generated_at": "2026-10-15T23:01:41.398234+00:00",
+  "environment": "Chromium; real WebRTC on loopback; fake camera/microphone; fixture signalling transport",
+  "attempted": 2,
+  "connected": 2,
+  "types": [
+    "video",
+    "voice"
+  ]
+}

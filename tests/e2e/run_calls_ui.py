@@ -81,7 +81,7 @@ with sync_playwright() as p:
     alice.wait_for_function("!document.getElementById('incoming-call-dialog').open")
     assert alice.evaluate("activeCall.role") == "callee" and alice.evaluate("activeCall.phase") == "connecting"; ok("accept: local media acquired, moves to 'connecting'")
     alice.wait_for_timeout(200)
-    assert CALLS[700]["status"] == "connected"; ok("POST /api/calls/700/accept marked it connected")
+    assert CALLS[700]["status"] == "accepted"; ok("POST /api/calls/700/accept recorded acceptance without claiming media connected")
 
     print("== 8. Simulate the real ICE/DTLS handshake completing")
     alice.evaluate("""() => {

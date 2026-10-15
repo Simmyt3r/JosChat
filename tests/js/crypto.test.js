@@ -103,3 +103,16 @@ test("the key store reports itself unavailable where there is no IndexedDB (Node
   assert.equal(C.KeyStore.available(), false);
   assert.equal(C.supported, true);
 });
+
+test('attachment bytes are encrypted, authenticated and bound to their sender/chat', async () => {
+  const bytes = new TextEncoder().encode('private attachment content');
+  const file = await C.encryptAttachment(bytes, 4, 'alice');
+  assert.equal(new TextDecoder().decode(file.bytes).includes('private attachment'), false);
+  assert.deepEqual(new Uint8Array(await C.decryptAttachment(file.bytes, file, 4, 'alice')), bytes);
+  await assert.rejects(() => C.decryptAttachment(file.bytes, file, 5, 'alice'));
+  await assert.rejects(() => C.decryptAttachment(file.bytes, file, 4, 'bob'));
+  const changed = file.bytes.slice(); changed[changed.length-1] ^= 1;
+  await assert.rejects(() => C.decryptAttachment(changed, file, 4, 'alice'));
+  const other = await C.encryptAttachment(bytes, 4, 'alice');
+  assert.notDeepEqual(file.bytes, other.bytes);
+});

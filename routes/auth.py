@@ -276,6 +276,25 @@ def create_profile():
     return jsonify({"profile": dict(profile)}), 201
 
 
+@auth_bp.route("/profile", methods=["PATCH"])
+@require_auth
+def update_profile():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", g.profile["username"])
+    if not isinstance(username, str): return jsonify({"error": "Invalid username"}), 400
+    username = username.strip()
+    error = _validate_username(username)
+    phone, phone_error = normalize_phone(data.get("phone_number", g.profile.get("phone_number")), required=True)
+    if error or phone_error: return jsonify({"error": error or phone_error}), 400
+    try:
+        with db_cursor(commit=True) as cur:
+            cur.execute("UPDATE profiles SET username = %s, phone_number = %s WHERE id = %s RETURNING *", (username, phone, g.profile["id"]))
+            profile = cur.fetchone()
+    except psycopg2.errors.UniqueViolation:
+        return jsonify({"error": "That username or phone number is already taken"}), 409
+    return jsonify({"profile": dict(profile)}), 200
+
+
 @auth_bp.route("/public-key", methods=["PUT"])
 @require_auth
 def set_public_key():

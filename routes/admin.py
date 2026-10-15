@@ -26,9 +26,12 @@ the person signed in isn't one, while every actual read happens through
 """
 
 from flask import Blueprint, jsonify, g
+import json
+from datetime import datetime, timezone
 
 from extensions import db_cursor
 from utils.auth_helpers import require_auth, require_admin
+from utils.integrity import run_audit, verify_receipts
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -58,6 +61,8 @@ def suspend_user(user_id):
             (str(user_id),),
         )
         user = cur.fetchone()
+        if user:
+            cur.execute("UPDATE calls SET status = 'ended', ended_at = now() WHERE (caller_id = %s OR callee_id = %s) AND ended_at IS NULL", (str(user_id),str(user_id)))
     if not user:
         return jsonify({"error": "User not found"}), 404
     return jsonify({"user": dict(user)}), 200
@@ -82,10 +87,8 @@ def reinstate_user(user_id):
 @require_auth
 @require_admin
 def validate_blockchain():
-    with db_cursor() as cur:
-        cur.execute("SELECT * FROM validate_chain()")
-        result = cur.fetchone()
-    report = dict(result) if result else {"is_valid": True, "invalid_index": None, "blocks_checked": 0}
+    with db_cursor(commit=True) as cur:
+        report = run_audit(cur, "manual")
     return jsonify(report), 200
 
 
@@ -126,17 +129,21 @@ def validate_conversation_route(conversation_id):
         if cur.fetchone() is None:
             return jsonify({"error": "Conversation not found"}), 404
 
-        cur.execute("SELECT * FROM validate_conversation(%s)", (conversation_id,))
+        cur.execute("SELECT m.*, id AS message_id, validate_message(id) AS verified FROM messages m WHERE conversation_id = %s ORDER BY id", (conversation_id,))
         results = cur.fetchall()
+        verify_receipts(cur, results)
+        cur.execute("SELECT count(*) AS n FROM blocks b LEFT JOIN messages m ON m.block_index = b.index WHERE b.conversation_id = %s AND m.id IS NULL", (conversation_id,))
+        missing = cur.fetchone()["n"]
 
     results = [dict(r) for r in results]
     flagged = [r["message_id"] for r in results if not r.get("verified", True)]
     return jsonify({
         "conversation_id": conversation_id,
         "messages_checked": len(results),
-        "all_verified": len(flagged) == 0,
+        "all_verified": len(flagged) == 0 and missing == 0,
+        "missing_messages": missing,
         "flagged_message_ids": flagged,
-        "results": results,
+        "results": [{"message_id": r["message_id"], "verified": r["verified"]} for r in results],
     }), 200
 
 
@@ -161,6 +168,8 @@ def platform_stats():
         total_calls = cur.fetchone()["n"]
         cur.execute("SELECT status, COUNT(*) AS n FROM calls GROUP BY status")
         calls_by_status = {row["status"]: row["n"] for row in cur.fetchall()}
+        cur.execute("SELECT count(*) FILTER (WHERE connected_at IS NOT NULL) AS connected, count(*) FILTER (WHERE accepted_at IS NOT NULL) AS accepted FROM calls")
+        connection_counts = cur.fetchone()
 
     return jsonify({
         "total_users": total_users,
@@ -171,4 +180,32 @@ def platform_stats():
         "total_blocks": total_blocks,
         "total_calls": total_calls,
         "calls_by_status": calls_by_status,
+        "calls_connected": connection_counts["connected"],
+        "calls_accepted": connection_counts["accepted"],
+        "connection_success_rate": connection_counts["connected"] / total_calls if total_calls else None,
     }), 200
+
+
+@admin_bp.route("/audits", methods=["GET"])
+@require_auth
+@require_admin
+def audit_history():
+    with db_cursor() as cur:
+        cur.execute("SELECT * FROM private.integrity_audits ORDER BY id DESC LIMIT 50")
+        rows = cur.fetchall()
+    return jsonify({"audits": [dict(r) for r in rows]})
+
+
+@admin_bp.route("/report", methods=["GET"])
+@require_auth
+@require_admin
+def export_report():
+    with db_cursor(commit=True) as cur:
+        report = run_audit(cur, "export")
+        cur.execute("SELECT status,count(*) AS count, count(*) FILTER (WHERE connected_at IS NOT NULL) AS connected FROM calls GROUP BY status")
+        calls = [dict(r) for r in cur.fetchall()]
+    response = jsonify({"generated_at": datetime.now(timezone.utc).isoformat(), "integrity": report, "calls": calls,
+                        "scope": "Private application ledger. Contains no message contents or private phone numbers."})
+    response.headers["Content-Disposition"] = 'attachment; filename="joschat-integrity-report.json"'
+    response.headers["Cache-Control"] = "no-store"
+    return response

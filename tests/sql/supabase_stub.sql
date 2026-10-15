@@ -13,3 +13,11 @@ do $$ begin
         create publication supabase_realtime;
     end if;
 end $$;
+
+create schema if not exists realtime;
+create table if not exists realtime.messages(id bigint generated always as identity primary key, extension text);
+alter table realtime.messages enable row level security;
+grant usage on schema realtime to authenticated;
+grant select, insert on realtime.messages to authenticated;
+create or replace function realtime.topic() returns text language sql stable as
+$$ select current_setting('realtime.topic', true) $$;

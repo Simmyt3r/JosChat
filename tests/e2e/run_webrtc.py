@@ -34,7 +34,7 @@ with sync_playwright() as p:
     register(alice, "alice"); register(bob, "bob")
     aid, bid = alice.evaluate("currentProfile.id"), bob.evaluate("currentProfile.id")
     alice.fill("#chat-search", "bob"); alice.press("#chat-search", "Enter")
-    alice.wait_for_function("!document.getElementById('video-call-btn').disabled")
+    alice.wait_for_function("currentConversationId !== null && keyInfo !== null && !document.getElementById('video-call-btn').disabled")
     DIRECT = alice.evaluate("currentConversationId")
     ok(f"direct chat #{DIRECT}, call buttons enabled")
 
@@ -133,4 +133,8 @@ with sync_playwright() as p:
 
     errs = ea + eb
     print("\nJS ERRORS:", errs if errs else "none")
+    assert not errs, errs
+    import os, datetime
+    if os.environ.get("JOSCHAT_EVALUATION_OUTPUT"):
+        pathlib.Path(os.environ["JOSCHAT_EVALUATION_OUTPUT"]).write_text(json.dumps({"generated_at":datetime.datetime.now(datetime.timezone.utc).isoformat(),"environment":"Chromium; real WebRTC on loopback; fake camera/microphone; fixture signalling transport", "attempted":len(CALLS),"connected":sum(bool(c.get("connected_at")) for c in CALLS.values()),"types":[c["call_type"] for c in CALLS.values()]},indent=2)+"\n")
     br.close()

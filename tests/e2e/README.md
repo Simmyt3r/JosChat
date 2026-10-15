@@ -34,4 +34,20 @@ What that means for what is and isn't proven:
   directly, shaped like a real `postgres_changes` payload. Check this on the deployed
   site with two accounts.
 - **Not proven:** calls across different networks. Both peers here are on one machine,
-  so no NAT traversal is exercised, and only a public STUN server is configured (no TURN).
+  so no NAT traversal is exercised. TURN configuration is tested separately; a real provider must be configured for deployment.
+
+
+## Completion regression checks
+
+`python tests/e2e/run_completion_ui.py` verifies file encryption/decryption, digest
+failure, group rename/add/remove/leave, history keys, profile editing, mobile layout,
+and service-worker notification ownership/privacy. The operating-system notification
+presentation method is stubbed because headless shell cannot present OS alerts.
+`python tests/e2e/run_call_checks.py` starts its own local app shell and runs calling
+checks. The fake transport refuses any call channel without `private: true`; SQL
+integration tests separately enforce participant policies. Chromium is allowed to
+use loopback interfaces solely for these isolated tests.
+
+Set `JOSCHAT_EVALUATION_OUTPUT` to a JSON path to record latency or call results.
+Messaging latency measures the real four-second polling fallback against a local
+HTTP fixture, not Supabase Realtime or mobile-network delivery.

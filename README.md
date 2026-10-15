@@ -83,7 +83,7 @@ JosChat/
 ├── templates/index.html         Demo UI
 ├── tests/                       pytest suite (unit tests + optional Postgres schema tests)
 └── static/
-    ├── js/app.js                 Demo client (auth, chats, messaging; calling is a sketch)
+    ├── js/app.js                 Browser app (auth, groups, messaging, encrypted files and calls)
     ├── manifest.json              PWA manifest
     └── sw.js                       Service worker (shell caching + encrypted IndexedDB outbox)
 ```
@@ -235,8 +235,8 @@ and Preview, then redeploy.
 | POST | `/api/media/upload` | Bearer | multipart `file` (+ `conversation_id`) → Cloudinary URL |
 | DELETE | `/api/media/<public_id>` | Bearer | Remove a Cloudinary asset |
 | POST | `/api/calls/start` | Bearer | `{conversation_id, callee_id, call_type}` — 409 if a call is already active there |
-| POST | `/api/calls/<id>/accept` | Bearer | Callee only; marks the call `connected` |
-| POST | `/api/calls/<id>/end` | Bearer | `{status?}` — one of `connected\|missed\|ended\|failed`, default `ended` |
+| POST | `/api/calls/<id>/accept` | Bearer | Callee only; marks the call `accepted` |
+| POST | `/api/calls/<id>/end` | Bearer | `{status?}` — one of `missed\|ended\|failed`, default `ended` |
 | GET | `/api/calls/<conversation_id>` | Bearer | Call history for a conversation |
 | GET | `/api/admin/users` | Admin | List all users |
 | POST | `/api/admin/users/<id>/suspend` | Admin | Suspend a user |
@@ -274,26 +274,15 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   (the app also warns when a contact's key changes); there is no forward secrecy
   (long-lived keys); and keys belong to one browser, so a new device must set up new
   keys and cannot read messages sealed to the old one.
-- **Encrypted media**: what's encrypted is the *reference* to an attachment, not the
-  file's bytes. Uploading still sends the file to `/api/media/upload` and then
-  Cloudinary as-is (so Cloudinary can generate previews/thumbnails and the upload
-  step can still be size/type-checked); once Cloudinary returns its URL, the client
-  seals `{url, public_id, resource_type, format}` with the same key that seals the
-  conversation's text (`encrypted_media` in the `messages` table) and sends only
-  that. A message row on its own no longer says where — or in which conversation —
-  an attachment lives, and the same tamper-evidence applies (moving a sealed
-  reference to another conversation or message fails to decrypt, exactly like text).
-  Decrypting an attachment also checks the URL is `https://res.cloudinary.com/<this
-  project's cloud name>/…` before it is ever fetched, since the server can no longer
-  check that itself once the reference is ciphertext (`isTrustedMediaUrl` in
-  `app.js`; the cloud name is served from `/api/config`). What this does **not**
-  give you: anyone who obtains a Cloudinary URL — from the decrypted reference, or by
-  guessing/scanning `public_id`s — can view that file without being a participant,
-  since Cloudinary does not check who is asking. Full end-to-end encryption of the
-  bytes themselves (encrypt client-side before upload, decrypt into a blob URL after
-  download) is the more thorough alternative; it was left for future work here.
-  Messages sent before this existed keep their old, unencrypted `media_url`/
-  `media_public_id`, which the client still renders (through the same trust check).
+- **Encrypted media**: new attachment bytes are encrypted on the sender's device
+  with a random AES-256-GCM file key before upload. Cloudinary receives a raw
+  `JCM1` encrypted container. The file key, digest, original name and type are
+  sealed inside `encrypted_media`. Recipients check the trusted storage origin,
+  ciphertext digest, authenticated sender/conversation binding and original size,
+  then render a local blob URL. New plaintext uploads/attachment links are rejected.
+  The client limits files to 24 MB to leave room for encryption and upload framing.
+  Historical attachments remain readable and explicitly carry a legacy warning;
+  their original uploaded bytes cannot be retroactively encrypted without a key holder.
 - **Blockchain decentralisation**: the chain is a single, private,
   application-layer hash chain hosted by your Supabase project, not a
   multi-node consensus network — see Chapter 2 of the project report for
@@ -326,19 +315,21 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   original sketch of this feature left as a known gap ("the offer isn't lost
   if the callee isn't listening yet"). Once a call exists, the two clients
   exchange the SDP offer/answer and ICE candidates over a Realtime Broadcast
-  channel named after the call, using Presence to know when both sides have
+  private, participant-authorized channel named after the call, using Presence to know when both sides have
   joined before the caller sends its offer — call media itself is peer-to-peer
   and never touches Supabase or Flask. `calls.status` is the durable call log
-  (`initiated → connected/missed/failed → ended`), read by call history and
+  (`initiated → accepted → connected → ended`, or `missed`/`failed`), read by call history and
   (eventually) the admin dashboard; it is not itself the live signal. Only
   available for one-to-one conversations; group calling is out of scope.
 - **Browser tests**: `tests/e2e/` holds Playwright scripts that drive the real UI, including a
   two-browser WebRTC call, with what is real and what is stood in for spelled out in its README.
-- **Call quality**: only a public STUN server is configured; a production
-  deployment behind restrictive NATs/firewalls will need a TURN server
-  (e.g. via Twilio or a self-hosted coturn instance) as a fallback. Calling
-  also depends on the same Realtime connection messaging does — see the
-  "What the browser can do" note above.
+- **Call quality**: the authenticated `/api/calls/ice` endpoint supports TURN
+  using temporary coturn REST credentials (`TURN_SHARED_SECRET`) or static provider
+  credentials. Configure `TURN_URLS` plus the appropriate secret/credentials.
+  Without them, calls use STUN and may fail across restrictive networks. The
+  connection log is updated by the actual `RTCPeerConnection` connection event,
+  rather than by the Accept button. Pending incoming calls are recovered on login
+  or returning to the app. Browser loopback tests do not measure cross-network NAT traversal.
 
 
 ## Messaging completion (October 2026)
@@ -362,8 +353,12 @@ app entry through query links, without caching API responses or admin pages.
   is included automatically. Members appear in the thread header, and received
   messages display their sender. Groups use the existing shared-passphrase
   encryption. Share that phrase privately; one-to-one secure-key encryption and
-  calls keep working for direct chats. Member changes/group calls are not part
-  of this release.
+  calls keep working for direct chats. Owners can rename/add/remove members;
+  every member can leave, and a departing owner transfers ownership. Membership
+  changes advance the encryption epoch and require unlocking a new sending key.
+  Agree on a fresh passphrase with current members. Earlier passphrases can be
+  added for reading history without changing the active sending key. Group calls
+  remain outside the document's scope.
 - **Phone registration:** new accounts and missing-profile setup require a phone
   number. Nigerian mobile format (`09039930006`) and country-code formats are
   normalized to E.164 (`+2349039930006`) before uniqueness checks and storage.
@@ -408,3 +403,55 @@ offline persistence across reload, reconnect delivery, lost-response retries,
 token refresh, tamper badges, logout cleanup and mobile overflow. It requires
 `pip install playwright==1.55.0` and `playwright install chromium --with-deps`.
 No test accesses live accounts or messages.
+
+## Functional completion and deployment
+
+The Flask/Supabase/Cloudinary/Vercel architecture is unchanged.
+
+Apply `supabase/migrations/20261011082623_complete_functionality.sql` to an existing
+installation, then the separate `20261015225602_push_delivery_schedule.sql` for
+hosted Supabase scheduling. Fresh databases use `supabase/schema.sql` followed by
+the scheduling migration. Historical ciphertext and block hashes are preserved.
+The migration adds append-only guards; account/conversation deletion must preserve
+message history. Do not disable the guards in normal application code.
+
+Set `LEDGER_SIGNING_KEY` to a durable random secret held outside Postgres. Keep it
+stable: replacing it invalidates existing receipts. `LEDGER_LEGACY_END_INDEX` is
+the block count verified at the upgrade boundary. Once, call
+`POST /api/system/seal-history` with `Authorization: Bearer <CRON_SECRET>` to sign
+that pre-deployment history. It never overwrites a receipt. New messages and their
+receipts are written in one transaction. Both message history and admin audits
+check payload hashes and HMAC receipts. Full audits also check deleted messages,
+index gaps and signed audit checkpoints. Browser pins flag changed observed hashes.
+A party controlling both the application signing key and the database remains
+trusted; this does not introduce distributed consensus or forward secrecy.
+
+Configure `VAPID_PRIVATE_KEY`, `VAPID_PUBLIC_KEY`, `VAPID_SUBJECT`, and `CRON_SECRET`.
+Users enable or disable generic Web Push alerts in Account settings. Neither push
+payloads nor audit exports contain decrypted text or private phone numbers.
+Supabase Vault entries `joschat_app_origin` and `joschat_cron_secret` supply the
+origin and credential for the minutely retry job. It invokes
+`GET /api/system/notifications` only while a queue is pending. Failed sends retry;
+expired subscriptions are removed. Notification presentation and push services
+still depend on browser support and user permission.
+
+Vercel runs `GET /api/system/maintenance` daily at 05:00 UTC. The protected route
+checks ledger content and receipts, records its result, and alerts subscribed
+administrators on failure. Admins can inspect audit history and download a JSON
+report. `GET /api/admin/stats` reports actual WebRTC connections divided by total
+call attempts, independently of acceptance counts.
+
+Additional authenticated APIs:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| PATCH | `/api/auth/profile` | Change username/private phone; role cannot be changed |
+| PATCH | `/api/conversations/<id>` | Rename, add, remove, or leave a group |
+| GET | `/api/calls/ice` | STUN/TURN configuration and temporary relay credentials |
+| GET | `/api/calls/incoming` | Recover a pending incoming call |
+| POST | `/api/calls/<id>/connected` | Record an actual peer connection |
+| POST/DELETE | `/api/notifications/subscriptions` | Own-device push opt-in/out |
+| GET | `/api/admin/audits` | Protected audit history |
+| GET | `/api/admin/report` | Download a fresh integrity report |
+
+See `evaluations/README.md` for measured laboratory results and reproducible tests.

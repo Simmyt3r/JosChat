@@ -13,7 +13,7 @@ def test_public_config_exposes_only_whats_meant_to_be_public(client):
     # to be visible to the browser (every media URL already contains the cloud name);
     # nothing secret (a service-role key, an API secret) belongs in this response.
     body = client.get("/api/config").get_json()
-    assert set(body) == {"supabase_url", "supabase_anon_key", "cloudinary_cloud_name"}
+    assert set(body) == {"supabase_url", "supabase_anon_key", "cloudinary_cloud_name", "vapid_public_key"}
     assert "secret" not in str(body).lower() and "service_role" not in str(body).lower()
 
 

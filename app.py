@@ -24,6 +24,8 @@ from routes.messages import messages_bp
 from routes.media import media_bp
 from routes.admin import admin_bp
 from routes.calls import calls_bp
+from routes.notifications import notifications_bp
+from routes.system import system_bp
 
 
 def create_app():
@@ -58,6 +60,8 @@ def create_app():
         app.register_blueprint(media_bp, url_prefix="/api/media")
         app.register_blueprint(admin_bp, url_prefix="/api/admin")
         app.register_blueprint(calls_bp, url_prefix="/api/calls")
+        app.register_blueprint(notifications_bp, url_prefix="/api/notifications")
+        app.register_blueprint(system_bp, url_prefix="/api/system")
     else:
         @app.before_request
         def _block_until_configured():
@@ -90,6 +94,7 @@ def create_app():
             # app's own Cloudinary storage before it is fetched/rendered, now that
             # the server can no longer check the (encrypted) media reference itself.
             "cloudinary_cloud_name": Config.CLOUDINARY_CLOUD_NAME,
+            "vapid_public_key": Config.VAPID_PUBLIC_KEY,
         }), 200
 
     @app.route("/", methods=["GET"])

@@ -63,6 +63,17 @@ class Config:
     CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY")
     CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET")
 
+    LEDGER_SIGNING_KEY = os.environ.get("LEDGER_SIGNING_KEY")
+    LEDGER_LEGACY_END_INDEX = int(os.environ.get("LEDGER_LEGACY_END_INDEX", "0"))
+    CRON_SECRET = os.environ.get("CRON_SECRET")
+    VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
+    VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+    VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "https://joschat.vercel.app")
+    TURN_URLS = os.environ.get("TURN_URLS", "")
+    TURN_SHARED_SECRET = os.environ.get("TURN_SHARED_SECRET")
+    TURN_USERNAME = os.environ.get("TURN_USERNAME")
+    TURN_PASSWORD = os.environ.get("TURN_PASSWORD")
+
     # Misc
     MAX_CONTENT_LENGTH = 25 * 1024 * 1024  # 25 MB upload ceiling
     ALLOWED_MEDIA_EXTENSIONS = {
@@ -92,7 +103,7 @@ class Config:
             missing.append("a Supabase anon/publishable key")
         if not (cls.POSTGRES_URL or cls.POSTGRES_URL_NON_POOLING):
             missing.append("POSTGRES_URL (or POSTGRES_URL_NON_POOLING)")
-        for name in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
+        for name in ("LEDGER_SIGNING_KEY", "CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
             if not getattr(cls, name):
                 missing.append(name)
         if missing:

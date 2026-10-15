@@ -36,9 +36,10 @@
   />
   <link rel="stylesheet" href="/static/css/style.css" />
 
-  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0"></script>
   <script defer src="/static/js/background.js"></script>
   <script defer src="/static/js/crypto.js"></script>
+  <script defer src="/static/js/completion.js"></script>
   <script defer src="/static/js/app.js"></script>
 </head>
 <body>
@@ -216,6 +217,7 @@
           <svg class="icon" aria-hidden="true"><use href="#i-key" /></svg>
           <span class="attention-dot" id="security-dot" hidden></span>
         </button>
+        <button type="button" class="icon-btn" id="profile-btn" aria-label="Account settings" title="Account settings"><svg class="icon" aria-hidden="true"><use href="#i-key" /></svg></button>
         <button type="button" class="icon-btn" id="signout-btn" aria-label="Sign out" title="Sign out">
           <svg class="icon" aria-hidden="true"><use href="#i-logout" /></svg>
         </button>
@@ -281,6 +283,7 @@
               <span class="dot" aria-hidden="true"></span><span id="live-status">Connecting…</span>
             </p>
           </div>
+          <button type="button" class="btn btn-secondary btn-compact" id="manage-group-btn" hidden>Group</button>
           <button type="button" class="icon-btn" id="voice-call-btn" aria-label="Start a voice call" title="Voice call">
             <svg class="icon" aria-hidden="true"><use href="#i-phone" /></svg>
           </button>
@@ -468,5 +471,25 @@
       navigator.serviceWorker.register("/sw.js");
     }
   </script>
+  <dialog id="manage-group-dialog" class="dialog" aria-labelledby="manage-group-title">
+    <div class="dialog-body"><h2 id="manage-group-title">Group settings</h2>
+    <p>Membership changes require a new passphrase. Share it privately with the current members. Previous messages keep their earlier passphrase.</p>
+    <form id="rename-group-form"><div class="field"><label for="rename-group-name">Group name</label><input id="rename-group-name" maxlength="80" required></div><button class="btn btn-secondary" type="submit">Save name</button></form>
+    <form id="add-member-form"><div class="field"><label for="add-member-name">Add by username</label><input id="add-member-name" maxlength="30" required></div><button class="btn btn-secondary" type="submit">Add member</button></form>
+    <form id="read-history-form"><div class="field"><label for="history-passphrase">Earlier message passphrase</label><input id="history-passphrase" type="password" maxlength="256" autocomplete="off" required></div><button class="btn btn-secondary" type="submit">Unlock earlier messages</button></form>
+    <ul id="manage-member-list"></ul><p id="manage-group-error" role="alert"></p>
+    <button id="leave-group-btn" type="button" class="btn btn-secondary">Leave group</button>
+    <button id="manage-group-close" type="button" class="btn btn-ghost">Close</button></div>
+  </dialog>
+  <dialog id="profile-dialog" class="dialog" aria-labelledby="profile-title"><div class="dialog-body">
+    <h2 id="profile-title">Account settings</h2>
+    <form id="edit-profile-form"><div class="field"><label for="edit-username">Username</label><input id="edit-username" maxlength="30" required autocomplete="username"></div>
+    <div class="field"><label for="edit-phone">Private phone number</label><input id="edit-phone" type="tel" maxlength="40" required autocomplete="tel"></div>
+    <p id="edit-profile-error" role="alert"></p><button type="submit" class="btn btn-primary">Save profile</button></form>
+    <hr><h3>Notifications</h3><p id="notification-state" role="status"></p>
+    <button type="button" id="enable-notifications-btn" class="btn btn-secondary">Enable notifications</button>
+    <button type="button" id="disable-notifications-btn" class="btn btn-ghost">Disable on this device</button>
+    <button id="profile-close" type="button" class="btn btn-ghost">Close</button>
+  </div></dialog>
 </body>
 </html>

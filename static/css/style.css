@@ -681,3 +681,13 @@ body.in-app #bg-canvas { display: none; }
 .seal-label { font-size: .65rem; font-weight: 600; }
 .seal:disabled { opacity: .9; cursor: default; }
 .queued-remove { display: block; margin-top: .5rem; padding: .2rem 0; border: 0; background: transparent; color: inherit; text-decoration: underline; font-size: .7rem; }
+
+/* Completion controls use the existing dialog and button system. */
+.dialog-body > p { color: var(--dim); margin: .8rem 0; line-height: 1.5; }
+.dialog-body form { margin: 1rem 0; }
+.dialog-body hr { border: 0; border-top: 1px solid var(--line); margin: 1.25rem 0; }
+#manage-member-list { list-style: none; padding: 0; margin: 1rem 0; }
+#manage-member-list li { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .3rem 0; overflow-wrap: anywhere; }
+#manage-group-error, #edit-profile-error { color: var(--danger); }
+.thread-id { min-width: 0; }
+@media (max-width: 480px) { .thread-head { flex-wrap: wrap; gap: .3rem; } .thread-id { flex: 1; } #manage-group-btn { margin-left: auto; } }

@@ -35,9 +35,11 @@ def db():
     conn = psycopg2.connect(URL)
     conn.autocommit = True
     cur = conn.cursor()
-    cur.execute("drop schema public cascade; create schema public; drop schema if exists auth cascade;")
+    cur.execute("drop schema public cascade; create schema public; drop schema if exists auth cascade; drop schema if exists private cascade; drop schema if exists realtime cascade;")
     cur.execute(STUB)
     cur.execute(SCHEMA)
+    # Tamper tests deliberately simulate a DBA bypassing append-only guards.
+    cur.execute("alter table blocks disable trigger immutable_history; alter table messages disable trigger immutable_history;")
     yield cur
     conn.close()
 
@@ -74,9 +76,9 @@ def test_schema_can_be_applied_twice(db):
 
 def test_chain_is_valid_and_independent_of_session_timezone(db):
     conv = _conversation(db)
-    db.execute("select idx from add_block('m1', %s, %s)", (U1, conv))
+    _send(db, conv, U1, "m1")
     db.execute("set timezone = 'Africa/Lagos'")
-    db.execute("select idx from add_block('m2', %s, %s)", (U2, conv))
+    _send(db, conv, U2, "m2")
     db.execute("set timezone = 'America/Los_Angeles'")
     db.execute("select is_valid, blocks_checked from validate_chain()")
     assert db.fetchone() == (True, 2)
@@ -84,8 +86,8 @@ def test_chain_is_valid_and_independent_of_session_timezone(db):
 
 def test_tampering_is_detected(db):
     conv = _conversation(db)
-    db.execute("select idx from add_block('m1', %s, %s)", (U1, conv))
-    db.execute("select idx from add_block('m2', %s, %s)", (U2, conv))
+    _send(db, conv, U1, "m1")
+    _send(db, conv, U2, "m2")
     db.execute("update blocks set message_hash = 'TAMPERED' where index = 1")
     db.execute("select is_valid, invalid_index from validate_chain()")
     assert db.fetchone() == (False, 1)
@@ -235,7 +237,7 @@ def test_an_existing_database_is_upgraded_without_rewriting_history(db):
     db.execute("insert into profiles(id, username) values (%s, 'alice')", (U1,))
     db.execute("insert into conversations(created_by) values (%s) returning id", (U1,))
     conv = db.fetchone()[0]
-    db.execute("select idx from add_block('new', %s, %s)", (U1, conv))
+    _send(db, conv, U1, "new")
     db.execute("select is_valid, blocks_checked from validate_chain()")
     assert db.fetchone() == (True, 3)                           # old and new blocks chain together
 

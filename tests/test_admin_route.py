@@ -4,6 +4,7 @@ routes/admin.py: every route here must refuse anyone who isn't an admin
 """
 
 from contextlib import contextmanager
+from utils.integrity import receipt_signature, payload_hash
 
 import pytest
 
@@ -151,7 +152,7 @@ def test_listing_conversations(admin_as):
 # --- blockchain audits ---------------------------------------------------------
 
 def test_full_chain_audit_reports_a_valid_chain(admin_as):
-    rows = [{"is_valid": True, "invalid_index": None, "blocks_checked": 42}]
+    rows = [{"is_valid": True, "invalid_index": None, "blocks_checked": 42}, [{"index":i,"block_hash":"h","message_id":i+1,"receipt_message_id":i+1,"encrypted_content":"c","encrypted_media":None,"media_url":None,"media_public_id":None,"integrity_version":2,"payload_hash":payload_hash("c"),"signature":receipt_signature(i,"h",i+1,payload_hash("c"))} for i in range(42)]]
     res, cur = admin_as(ADMIN)("get", "/api/admin/blockchain/validate", rows)
     body = res.get_json()
     assert res.status_code == 200
@@ -166,10 +167,10 @@ def test_full_chain_audit_reports_tampering(admin_as):
 
 
 def test_full_chain_audit_on_an_empty_chain(admin_as):
-    res, cur = admin_as(ADMIN)("get", "/api/admin/blockchain/validate", [None])
+    res, cur = admin_as(ADMIN)("get", "/api/admin/blockchain/validate", [{"is_valid": True, "invalid_index": None, "blocks_checked": 0}, []])
     body = res.get_json()
     assert res.status_code == 200
-    assert body == {"is_valid": True, "invalid_index": None, "blocks_checked": 0}
+    assert body["is_valid"] is True and body["blocks_checked"] == 0
 
 
 def test_conversation_audit_all_clear(admin_as):
@@ -180,6 +181,8 @@ def test_conversation_audit_all_clear(admin_as):
             {"message_id": 2, "verified": True},
         ],
     ]
+    for row in rows[1]: row.update(block_index=row["message_id"], block_hash="h",encrypted_content="c")
+    rows += [[{"block_index":i,"message_id":i,"payload_hash":payload_hash("c"),"signature":receipt_signature(i,"h",i,payload_hash("c"))} for i in (1,2)], {"n":0}]
     res, cur = admin_as(ADMIN)("get", "/api/admin/conversations/9/validate", rows)
     body = res.get_json()
     assert res.status_code == 200
@@ -197,6 +200,8 @@ def test_conversation_audit_flags_tampered_messages(admin_as):
             {"message_id": 2, "verified": False},
         ],
     ]
+    for row in rows[1]: row.update(block_index=row["message_id"], block_hash="h",encrypted_content="c")
+    rows += [[{"block_index":i,"message_id":i,"payload_hash":payload_hash("c"),"signature":receipt_signature(i,"h",i,payload_hash("c"))} for i in (1,2)], {"n":0}]
     res, cur = admin_as(ADMIN)("get", "/api/admin/conversations/9/validate", rows)
     body = res.get_json()
     assert body["all_verified"] is False
@@ -214,6 +219,7 @@ def test_platform_stats_assembles_every_counter(admin_as):
     rows = [
         {"n": 10}, {"n": 8}, {"n": 2}, {"n": 5}, {"n": 100}, {"n": 300}, {"n": 7},
         [{"status": "ended", "n": 5}, {"status": "missed", "n": 2}],
+        {"connected": 5, "accepted": 6},
     ]
     res, cur = admin_as(ADMIN)("get", "/api/admin/stats", rows)
     body = res.get_json()
@@ -227,4 +233,5 @@ def test_platform_stats_assembles_every_counter(admin_as):
         "total_blocks": 300,
         "total_calls": 7,
         "calls_by_status": {"ended": 5, "missed": 2},
+        "calls_connected": 5, "calls_accepted": 6, "connection_success_rate": 5/7,
     }

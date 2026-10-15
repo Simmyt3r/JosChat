@@ -163,6 +163,25 @@
   }
 
   // ---- key storage (browser only) ----------------------------------------------
+  async function encryptAttachment(bytes, conversationId, senderId) {
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+    const iv = root.crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv,
+      additionalData: enc.encode(`joschat/file/v1|${conversationId}|${senderId}`) }, key, bytes));
+    const sealed = new Uint8Array(16 + ciphertext.length);
+    sealed.set(enc.encode("JCM1")); sealed.set(iv, 4); sealed.set(ciphertext, 16);
+    return { bytes: sealed, key: bytesToB64(new Uint8Array(await subtle.exportKey("raw", key))),
+      digest: await sha256Hex(sealed) };
+  }
+
+  async function decryptAttachment(bytes, info, conversationId, senderId) {
+    const sealed = new Uint8Array(bytes);
+    if (sealed.length < 32 || dec.decode(sealed.slice(0,4)) !== "JCM1" ||
+        await sha256Hex(sealed) !== info.digest) throw new Error("Attachment integrity failed");
+    const key = await subtle.importKey("raw", b64ToBytes(info.key), { name: "AES-GCM" }, false, ["decrypt"]);
+    return subtle.decrypt({ name: "AES-GCM", iv: sealed.slice(4,16),
+      additionalData: enc.encode(`joschat/file/v1|${conversationId}|${senderId}`) }, key, sealed.slice(16));
+  }
 
   const DB_NAME = "joschat-keys";
   const STORE = "keypairs";
@@ -213,6 +232,8 @@
     isV2,
     encrypt,
     decrypt,
+    encryptAttachment,
+    decryptAttachment,
     KeyStore,
   };
 

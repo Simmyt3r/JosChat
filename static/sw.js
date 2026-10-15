@@ -1,9 +1,9 @@
 /* Only encrypted message bodies enter this durable outbox. No plaintext, keys,
  * attachments or refresh tokens are persisted here. Access tokens expire normally. */
-const CACHE_NAME = "joschat-cache-v9";
+const CACHE_NAME = "joschat-cache-v10";
 const OUTBOX_DB = "joschat-outbox";
 const SYNC_TAG = "joschat-send-messages";
-const OFFLINE_URLS = ["/", "/app", "/static/js/app.js", "/static/js/background.js", "/static/js/crypto.js",
+const OFFLINE_URLS = ["/", "/app", "/static/js/app.js", "/static/js/completion.js", "/static/js/background.js", "/static/js/crypto.js",
   "/static/css/style.css", "/static/js/landing.js", "/static/css/landing.css", "/static/manifest.json", "/static/favicon.ico",
   "/static/icons/icon-192.png", "/static/icons/icon-512.png"];
 const clientOwners = new Map();
@@ -184,4 +184,49 @@ self.addEventListener("fetch", (event) => {
     return res;
   }).catch(async () => (await caches.match(req)) ||
     ((url.pathname === "/app" || url.pathname === "/") ? caches.match(url.pathname) : undefined)));
+});
+
+// Push ownership is durable across worker restarts and cleared at sign-out.
+function notificationOwner(value) {
+  return new Promise((resolve,reject) => {
+    const request = indexedDB.open("joschat-notifications",1);
+    request.onupgradeneeded = () => request.result.createObjectStore("settings");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("settings", value === undefined ? "readonly" : "readwrite");
+      const store = tx.objectStore("settings");
+      const operation = value === undefined ? store.get("owner") : store.put(value,"owner");
+      tx.oncomplete = () => { resolve(operation.result); db.close(); }; tx.onerror = () => { reject(tx.error); db.close(); };
+    };
+  });
+}
+self.addEventListener("message", (event) => {
+  if (event.data?.type !== "NOTIFICATION_OWNER") return;
+  event.waitUntil(notificationOwner(event.data.owner_id || null).then(() => event.ports[0]?.postMessage({ok:true})));
+});
+async function showPushNotification(data) {
+  if (!data || data.owner_id !== await notificationOwner()) return;
+  const audit = data.kind === "audit";
+  const url = audit ? "/admin" : "/app" + (Number.isSafeInteger(data.conversation_id) ? "?conversation="+data.conversation_id : "");
+  await self.registration.showNotification("Joschat", {
+    body: audit ? "An integrity audit needs your attention." : data.kind === "call" ? "You have an incoming call. Open Joschat to answer." : "You have a new encrypted message.",
+    icon: "/static/icons/icon-192.png", tag: `${data.kind}:${data.conversation_id || "admin"}`, data: {url},
+  });
+}
+self.addEventListener("push", (event) => {
+  let data; try { data = event.data.json(); } catch { return; }
+  event.waitUntil(showPushNotification(data));
+});
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const path = event.notification.data?.url || "/app";
+    const url = new URL(path,self.location.origin);
+    if (url.origin !== self.location.origin || !["/app","/admin"].includes(url.pathname)) return;
+    const windows = await self.clients.matchAll({type:"window",includeUncontrolled:true});
+    const existing = windows.find(c => new URL(c.url).pathname === url.pathname);
+    if (existing) { await existing.navigate(url.href); await existing.focus(); }
+    else await self.clients.openWindow(url.href);
+  })());
 });

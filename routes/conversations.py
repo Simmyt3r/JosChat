@@ -21,6 +21,57 @@ from utils.auth_helpers import require_auth
 conversations_bp = Blueprint("conversations", __name__)
 
 
+@conversations_bp.route("/<int:conversation_id>", methods=["PATCH"])
+@require_auth
+def manage_group(conversation_id):
+    """Owner renames/changes membership; any member can leave. Serialize changes."""
+    data = request.get_json(silent=True) or {}
+    action = data.get("action", "rename")
+    if action not in ("rename", "add", "remove", "leave"):
+        return jsonify({"error": "Unknown group action"}), 400
+    me = str(g.profile["id"])
+    with db_cursor(commit=True) as cur:
+        cur.execute("SELECT * FROM conversations WHERE id = %s FOR UPDATE", (conversation_id,))
+        c = cur.fetchone()
+        if not c or not c["is_group"]:
+            return jsonify({"error": "Group not found"}), 404
+        cur.execute("SELECT user_id FROM conversation_participants WHERE conversation_id = %s ORDER BY joined_at, user_id", (conversation_id,))
+        members = [str(p["user_id"]) for p in cur.fetchall()]
+        if me not in members or (action != "leave" and me != str(c["created_by"])):
+            return jsonify({"error": "Only the group owner can make that change"}), 403
+        if action == "rename":
+            title = data.get("title")
+            if not isinstance(title, str) or not 1 <= len(title.strip()) <= 80:
+                return jsonify({"error": "Group name must be between 1 and 80 characters"}), 400
+            cur.execute("UPDATE conversations SET title = %s WHERE id = %s RETURNING *", (title.strip(), conversation_id))
+        else:
+            target = me
+            if action == "add":
+                username = data.get("username")
+                if not isinstance(username, str):
+                    return jsonify({"error": "A username is required"}), 400
+                cur.execute("SELECT id FROM profiles WHERE username = %s AND status = 'active'", (username.strip().lstrip('@'),))
+                p = cur.fetchone()
+                if not p: return jsonify({"error": "No such active user"}), 404
+                target = str(p["id"])
+                if target in members: return jsonify({"error": "Already a member"}), 409
+                if len(members) >= 50: return jsonify({"error": "A group can have at most 50 members"}), 400
+                cur.execute("INSERT INTO conversation_participants(conversation_id,user_id) VALUES (%s,%s)", (conversation_id, target))
+            else:
+                if action == "remove":
+                    try: target = str(uuid.UUID(data.get("user_id", "")))
+                    except (ValueError, TypeError, AttributeError): return jsonify({"error": "A valid user_id is required"}), 400
+                    if target == me: return jsonify({"error": "Use Leave group to transfer ownership"}), 400
+                    if target not in members: return jsonify({"error": "Member not found"}), 404
+                cur.execute("DELETE FROM conversation_participants WHERE conversation_id = %s AND user_id = %s", (conversation_id, target))
+                if target == str(c["created_by"]):
+                    others = [uid for uid in members if uid != target]
+                    cur.execute("UPDATE conversations SET created_by = %s WHERE id = %s", (others[0] if others else None, conversation_id))
+            cur.execute("UPDATE conversations SET key_epoch = key_epoch + 1 WHERE id = %s RETURNING *", (conversation_id,))
+        updated = cur.fetchone()
+    return jsonify({"conversation": dict(updated), "left": action == "leave", "passphrase_changed": action != "rename"}), 200
+
+
 def _as_str_list(value):
     if value is None:
         return []

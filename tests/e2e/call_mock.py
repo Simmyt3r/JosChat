@@ -55,6 +55,7 @@ def api(route, request):
     me = user_by_token(request)
     if not me: return j({"error": "unauthorized"}, 401)
     if path == "/api/auth/me": return j({"profile": public(me)})
+    if path == "/api/calls/ice": return j({"ice_servers":[{"urls":"stun:stun.l.google.com:19302"}],"relay_available":False})
     if path == "/api/auth/logout": return j({"message": "ok"})
     if path == "/api/auth/public-key" and m == "PUT":
         key, err = validate_public_key(body.get("public_key"))
@@ -97,7 +98,12 @@ def api(route, request):
     if mm:
         call = CALLS.get(int(mm[1]))
         if not call or call["callee_id"] != me["id"] or call["status"] != "initiated": return j({"error": "not found"}, 404)
-        call["status"] = "connected"; return j({"call": call})
+        call["status"] = "accepted"; call["accepted_at"] = iso(); return j({"call": call})
+    mm = re.match(r"^/api/calls/(\d+)/connected$", path)
+    if mm:
+        call = CALLS.get(int(mm[1]))
+        if not call or me["id"] not in (call["caller_id"],call["callee_id"]) or call["status"] not in ("accepted","connected"): return j({"error":"not accepted"},409)
+        call["status"] = "connected"; call["connected_at"] = iso(); return j({"call":call})
     mm = re.match(r"^/api/calls/(\d+)/end$", path)
     if mm:
         call = CALLS.get(int(mm[1]))
@@ -151,4 +157,4 @@ def open_chat(pg, nth=0):
 def ok(m): print("  ok:", m)
 
 FAKE_MEDIA_ARGS = ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
-                    "--use-fake-device-for-media-stream", "--mute-audio"]
+                    "--use-fake-device-for-media-stream", "--mute-audio", "--allow-loopback-in-peer-connection", "--disable-features=WebRtcHideLocalIpsWithMdns"]

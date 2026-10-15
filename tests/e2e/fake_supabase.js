@@ -5,7 +5,9 @@
 // faithful Phoenix-protocol implementation.
 (function () {
   const senderId = Math.random().toString(36).slice(2);
-  function makeChannel(topic) {
+  function makeChannel(topic, options = {}) {
+    if (topic.startsWith("call-") && !options.config?.private) throw new Error("Call signalling must be private");
+    const presenceKey = options.config?.presence?.key || senderId;
     const handlers = [];
     const presence = {};
     let cursor = 0, joined = false, timer = null;
@@ -21,13 +23,13 @@
           body: JSON.stringify({ topic, kind: "bc", event, payload, sender: senderId }) }).then(() => {});
       },
       track(payload) {
-        presence[senderId] = payload;
+        presence[presenceKey] = payload;
         return fetch("/api/__relay/publish", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic, kind: "presence", key: senderId, payload, sender: senderId }) }).then(() => {});
+          body: JSON.stringify({ topic, kind: "presence", key: presenceKey, payload, sender: senderId }) }).then(() => {});
       },
       untrack() {
         return fetch("/api/__relay/publish", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic, kind: "presence-leave", key: senderId, sender: senderId }) }).then(() => {});
+          body: JSON.stringify({ topic, kind: "presence-leave", key: presenceKey, sender: senderId }) }).then(() => {});
       },
       presenceState() { return presence; },
       unsubscribe() {
@@ -62,7 +64,7 @@
     createClient() {
       return {
         realtime: { setAuth() {} },
-        channel(topic) { return makeChannel(topic); },
+        channel(topic, options) { return makeChannel(topic, options); },
         removeChannel(channel) { channel.unsubscribe(); },
       };
     },

@@ -121,6 +121,11 @@
         <div id="conversation-audit-result" class="audit-result" hidden></div>
       </section>
 
+      <section class="admin-card" aria-labelledby="audit-history-title"><h2 id="audit-history-title">Audit history &amp; reports</h2>
+      <p>Daily checks validate payloads, missing messages, links and signed receipts. No decrypted content is included.</p>
+      <button type="button" class="btn btn-secondary" id="refresh-audits-btn">Refresh audits</button>
+      <button type="button" class="btn btn-secondary" id="export-report-btn">Download report</button>
+      <ul id="audit-history"></ul></section>
       <!-- Conversations -->
       <section class="admin-card" aria-labelledby="conversations-heading">
         <h2 id="conversations-heading">Conversations</h2>

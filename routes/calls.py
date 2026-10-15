@@ -22,13 +22,56 @@ SDP offer/answer and ICE candidates once a call is being set up — see the
 """
 
 import uuid
+import base64
+import hashlib
+import hmac
+import time
 
 from flask import Blueprint, request, jsonify, g
 
 from extensions import db_cursor
+from config import Config
 from utils.auth_helpers import require_auth
+from utils.notifications import queue_notification, dispatch_safely
 
 calls_bp = Blueprint("calls", __name__)
+
+
+@calls_bp.route("/incoming", methods=["GET"])
+@require_auth
+def pending_incoming():
+    with db_cursor() as cur:
+        cur.execute("SELECT * FROM calls WHERE callee_id = %s AND status = 'initiated' AND ended_at IS NULL "
+                    "AND started_at > now()-interval '2 minutes' ORDER BY started_at DESC LIMIT 1", (g.profile["id"],))
+        call = cur.fetchone()
+    return jsonify({"call": dict(call) if call else None})
+
+
+@calls_bp.route("/ice", methods=["GET"])
+@require_auth
+def ice_servers():
+    servers = [{"urls": "stun:stun.l.google.com:19302"}]
+    urls = [u.strip() for u in Config.TURN_URLS.split(',') if u.strip().startswith(('turn:', 'turns:'))]
+    if urls and Config.TURN_SHARED_SECRET:
+        username = f"{int(time.time()) + 3600}:{g.profile['id']}"
+        credential = base64.b64encode(hmac.new(Config.TURN_SHARED_SECRET.encode(), username.encode(), hashlib.sha1).digest()).decode()
+        servers.append({"urls": urls, "username": username, "credential": credential})
+    elif urls and Config.TURN_USERNAME and Config.TURN_PASSWORD:
+        servers.append({"urls": urls, "username": Config.TURN_USERNAME, "credential": Config.TURN_PASSWORD})
+    return jsonify({"ice_servers": servers, "relay_available": len(servers) > 1})
+
+
+@calls_bp.route("/<int:call_id>/connected", methods=["POST"])
+@require_auth
+def connected_call(call_id):
+    # Reported by RTCPeerConnection.connectionState, never by the Accept button.
+    with db_cursor(commit=True) as cur:
+        cur.execute("UPDATE calls SET status = 'connected', connected_at = coalesce(connected_at, now()) "
+                    "WHERE id = %s AND (caller_id = %s OR callee_id = %s) AND status IN ('accepted','connected') RETURNING *",
+                    (call_id, g.profile["id"], g.profile["id"]))
+        call = cur.fetchone()
+    if not call: return jsonify({"error": "Call is not accepted or has ended"}), 409
+    return jsonify({"call": dict(call)})
 
 
 @calls_bp.route("/start", methods=["POST"])
@@ -49,12 +92,18 @@ def start_call():
         return jsonify({"error": "callee_id must be a valid user id"}), 400
     if call_type not in ("voice", "video"):
         return jsonify({"error": "call_type must be 'voice' or 'video'"}), 400
+    if callee_id == str(g.profile["id"]):
+        return jsonify({"error": "Choose another person to call"}), 400
 
     with db_cursor(commit=True) as cur:
+        cur.execute("SELECT is_group FROM conversations WHERE id = %s FOR UPDATE", (conversation_id,))
+        conversation = cur.fetchone()
+        if not conversation or conversation["is_group"]:
+            return jsonify({"error": "Calling is available in direct conversations"}), 400
         # Both ends of a call must actually belong to the conversation.
         for uid in (g.profile["id"], callee_id):
             cur.execute(
-                "SELECT 1 FROM conversation_participants WHERE conversation_id = %s AND user_id = %s",
+                "SELECT 1 FROM conversation_participants cp JOIN profiles p ON p.id = cp.user_id AND p.status = 'active' WHERE conversation_id = %s AND user_id = %s",
                 (conversation_id, uid),
             )
             if not cur.fetchone():
@@ -63,8 +112,9 @@ def start_call():
         # One call at a time per conversation — otherwise a double-click (or two
         # people calling each other at once) leaves a stray "ringing" row neither
         # side is actually listening to, since a client only tracks one call.
+        cur.execute("UPDATE calls SET status = 'missed', ended_at = now() WHERE conversation_id = %s AND status IN ('initiated','accepted') AND started_at < now() - interval '2 minutes'", (conversation_id,))
         cur.execute(
-            "SELECT 1 FROM calls WHERE conversation_id = %s AND status IN ('initiated', 'connected')",
+            "SELECT 1 FROM calls WHERE conversation_id = %s AND status IN ('initiated', 'accepted', 'connected') AND ended_at IS NULL",
             (conversation_id,),
         )
         if cur.fetchone():
@@ -79,7 +129,9 @@ def start_call():
             (conversation_id, g.profile["id"], callee_id, call_type),
         )
         call = cur.fetchone()
+        queue_notification(cur, [callee_id], f"call:{call['id']}", conversation_id, "call")
 
+    dispatch_safely()
     return jsonify({"call": dict(call)}), 201
 
 
@@ -90,7 +142,7 @@ def accept_call(call_id):
     with db_cursor(commit=True) as cur:
         cur.execute(
             """
-            UPDATE calls SET status = 'connected'
+            UPDATE calls SET status = 'accepted', accepted_at = now()
             WHERE id = %s AND callee_id = %s AND status = 'initiated'
             RETURNING *
             """,
@@ -108,14 +160,14 @@ def accept_call(call_id):
 def end_call(call_id):
     data = request.get_json(silent=True) or {}
     status = data.get("status", "ended")
-    if status not in ("connected", "missed", "ended", "failed"):
+    if status not in ("missed", "ended", "failed"):
         status = "ended"
 
     with db_cursor(commit=True) as cur:
         cur.execute(
             """
             UPDATE calls SET status = %s, ended_at = now()
-            WHERE id = %s AND (caller_id = %s OR callee_id = %s)
+            WHERE id = %s AND (caller_id = %s OR callee_id = %s) AND ended_at IS NULL
             RETURNING *
             """,
             (status, call_id, g.profile["id"], g.profile["id"]),

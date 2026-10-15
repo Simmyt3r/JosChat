@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import time
 import os
 from pathlib import Path
 import sys
@@ -18,13 +19,16 @@ from werkzeug.serving import make_server
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+os.environ.setdefault("LEDGER_SIGNING_KEY","browser-test-only-key")
 os.environ.update(SUPABASE_URL="https://example.supabase.co", SUPABASE_ANON_KEY="dummy",
                   POSTGRES_URL="postgres://u:p@localhost:5432/postgres",
                   CLOUDINARY_CLOUD_NAME="demo", CLOUDINARY_API_KEY="k", CLOUDINARY_API_SECRET="s")
 from app import create_app
 from utils.phone import normalize_phone
+from utils.integrity import payload_hash
 
 USERS, CONVS, MESSAGES = {}, {}, []
+MEDIA = {}
 STATE = {"fail_send": False, "lose_response": False, "expired": False, "verified_requests": 0, "refresh_fail": False}
 BASE = "http://localhost:5056"
 app = create_app()
@@ -37,7 +41,7 @@ def profile(u):
 
 
 def verified(m):
-    return hashlib.sha256(m["encrypted_content"].encode()).hexdigest() == m["digest"]
+    return payload_hash(m["encrypted_content"],m.get("encrypted_media")) == m["digest"]
 
 
 def message(m):
@@ -69,6 +73,9 @@ def fixture_api():
     token = request.headers.get("Authorization", "").removeprefix("Bearer tok-")
     u = next((u for u in USERS.values() if u["id"] == token), None)
     if not u or STATE["expired"]: return jsonify({"error": "Session expired"}), 401
+    if path == "/api/auth/profile" and request.method == "PATCH":
+        u.update(username=data["username"], phone_number=normalize_phone(data["phone_number"],required=True)[0]); return jsonify({"profile":profile(u)})
+    if path == "/api/calls/incoming": return jsonify({"call":None})
     if path == "/api/auth/me": return jsonify({"profile": profile(u)})
     if path == "/api/auth/logout": return jsonify({"message": "ok"})
     if path == "/api/conversations":
@@ -78,14 +85,29 @@ def fixture_api():
             if len(others) != len(names): return jsonify({"error": "No such user"}), 404
             cid = len(CONVS) + 1
             CONVS[cid] = {"id": cid, "title": data.get("title"), "is_group": data.get("is_group", False),
-                          "members": [u["id"], *[o["id"] for o in others]]}
+                          "created_by":u["id"], "key_epoch":1, "members": [u["id"], *[o["id"] for o in others]]}
             return jsonify({"conversation": CONVS[cid]}), 201
         return jsonify({"conversations": [{**c, "other_usernames": [p["username"] for p in USERS.values()
                         if p["id"] in c["members"] and p["id"] != u["id"]]} for c in CONVS.values() if u["id"] in c["members"]]})
     if path.startswith("/api/conversations/"):
         c = CONVS[int(path.rsplit("/", 1)[1])]
+        if request.method == "PATCH":
+            action=data.get("action","rename")
+            if action!="leave" and u["id"]!=c["created_by"]: return jsonify({"error":"Owner only"}),403
+            if action=="rename":c["title"]=data["title"]
+            elif action=="add":c["members"].append(next(p["id"] for p in USERS.values() if p["username"]==data["username"]))
+            else:
+                target=u["id"] if action=="leave" else data["user_id"];c["members"].remove(target)
+                if target==c["created_by"]:c["created_by"]=c["members"][0] if c["members"] else None
+            if action!="rename":c["key_epoch"]+=1
+            return jsonify({"conversation":c,"left":action=="leave","passphrase_changed":action!="rename"})
+        if u["id"] not in c["members"]:return jsonify({"error":"Not a member"}),403
         return jsonify({"conversation": c, "participants": [{"user_id": p["id"], "username": p["username"], "public_key": p.get("public_key")}
                         for p in USERS.values() if p["id"] in c["members"]]})
+    if path == "/api/media/upload":
+        file=request.files["file"]; body=file.read(); name=uuid.uuid4().hex+".jcm"; MEDIA[name]=body
+        assert body.startswith(b"JCM1") and request.form["encrypted"]=="1"
+        return jsonify({"secure_url":"https://res.cloudinary.com/demo/raw/upload/"+name,"public_id":"joschat/1/"+name,"resource_type":"raw"}),201
     if path == "/api/messages/send":
         if STATE["fail_send"]: return jsonify({"error": "Temporarily unavailable"}), 503
         if request.headers.get("X-Joschat-Owner") != u["id"]: return jsonify({"error": "Wrong account"}), 403
@@ -93,7 +115,7 @@ def fixture_api():
         if existing: return jsonify({"message": message(existing)}), 200
         m = {**data, "id": len(MESSAGES) + 1, "sender_id": u["id"], "block_index": len(MESSAGES),
              "block_hash": "f" * 64, "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-             "digest": hashlib.sha256(data["encrypted_content"].encode()).hexdigest()}
+             "digest": payload_hash(data["encrypted_content"],data.get("encrypted_media"))}
         MESSAGES.append(m)
         if STATE["lose_response"]:
             STATE["lose_response"] = False
@@ -135,6 +157,7 @@ def send(pg, text):
 def unlock(pg):
     pg.fill("#conv-passphrase", "a long private group phrase"); pg.click("#unlock-btn")
     pg.wait_for_selector("#composer:not([hidden])")
+    pg.wait_for_function("!document.getElementById('unlock-btn').classList.contains('is-busy')")
 
 
 def run():
@@ -201,6 +224,7 @@ def run():
             alice.wait_for_timeout(500)
             assert len(MESSAGES) == 3
             alice.wait_for_selector(".conv"); alice.click(".conv"); alice.wait_for_selector("#composer:not([hidden])")
+            alice.wait_for_function("document.getElementById('messages').textContent.includes('Offline first message')")
             assert "Offline first message" in alice.inner_text("#messages")
             print("PASS encrypted offline queue survives reload and sends on reconnect", flush=True)
             # Commit succeeded but response was lost: replay must not duplicate.
@@ -229,7 +253,7 @@ def run():
             alice.wait_for_selector("#chat-shell:not([hidden])")
             alice.wait_for_function("queuedRows.length === 0")
             assert len(MESSAGES) == 6
-            alice.click(".conv"); alice.wait_for_selector("#composer:not([hidden])")
+            alice.click(".conv"); alice.wait_for_selector("#unlock-panel:not([hidden])"); unlock(alice)
             print("PASS session expiry preserves the queue until owner reauthentication", flush=True)
             # Failing integrity does not leave a green badge behind.
             MESSAGES[0]["encrypted_content"] = "tampered"

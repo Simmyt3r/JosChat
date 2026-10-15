@@ -19,6 +19,10 @@ os.environ.update({
     "CLOUDINARY_API_KEY": "key",
     "CLOUDINARY_API_SECRET": "secret",
     "FLASK_DEBUG": "false",
+    "LEDGER_SIGNING_KEY": "test-only-ledger-key",
+    "CRON_SECRET": "test-only-cron-key",
+    "VAPID_PRIVATE_KEY": "",
+    "VAPID_PUBLIC_KEY": "",
 })
 
 ROOT = Path(__file__).resolve().parent.parent

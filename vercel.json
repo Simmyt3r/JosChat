@@ -1,13 +1,37 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/index.py", "use": "@vercel/python" },
-    { "src": "static/**", "use": "@vercel/static" }
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "static/**",
+      "use": "@vercel/static"
+    }
   ],
   "routes": [
-    { "src": "/api/(.*)", "dest": "api/index.py" },
-    { "src": "/favicon.ico", "dest": "static/favicon.ico" },
-    { "src": "/static/(.*)", "dest": "static/$1" },
-    { "src": "/(.*)", "dest": "api/index.py" }
+    {
+      "src": "/api/(.*)",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/favicon.ico",
+      "dest": "static/favicon.ico"
+    },
+    {
+      "src": "/static/(.*)",
+      "dest": "static/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/system/maintenance",
+      "schedule": "0 5 * * *"
+    }
   ]
 }

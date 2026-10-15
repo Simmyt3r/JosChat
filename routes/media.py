@@ -50,8 +50,13 @@ def upload_media():
     file = request.files["file"]
     if file.filename == "":
         return jsonify({"error": "No file selected"}), 400
-    if not _allowed_file(file.filename):
-        return jsonify({"error": "Unsupported file type"}), 415
+    # The opaque container is created by AES-GCM in the browser. Original names
+    # and MIME types are sealed inside the message, never sent to Cloudinary.
+    if request.form.get("encrypted") != "1" or not file.filename.endswith(".jcm"):
+        return jsonify({"error": "Upload an encrypted .jcm attachment"}), 415
+    if file.stream.read(4) != b"JCM1":
+        return jsonify({"error": "Invalid encrypted attachment container"}), 400
+    file.stream.seek(0)
 
     conversation_id = request.form.get("conversation_id", "")
     if not conversation_id.isdigit():
@@ -66,7 +71,7 @@ def upload_media():
             file,
             folder=folder,
             public_id=public_id,
-            resource_type="auto",   # auto-detects image / video / raw (audio)
+            resource_type="raw",
             overwrite=False,
         )
     except Exception as exc:
@@ -92,8 +97,4 @@ def delete_media(public_id):
         return jsonify({"error": "Not found"}), 404
     if not _is_participant(int(parts[1]), g.profile["id"]):
         return jsonify({"error": "Not a participant in this conversation"}), 403
-    try:
-        result = cloudinary.uploader.destroy(public_id, invalidate=True)
-    except Exception as exc:
-        return jsonify({"error": f"Delete failed: {exc}"}), 502
-    return jsonify(result), 200
+    return jsonify({"error": "Attachments are part of immutable message history"}), 409

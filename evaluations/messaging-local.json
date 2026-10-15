@@ -1,0 +1,11 @@
+{
+  "environment": "Local HTTP API fixture, real Chromium and AES-GCM; actual 4-second polling fallback; Supabase transport unavailable",
+  "samples_ms": [
+    3853.85,
+    3953.882,
+    3999.236,
+    3999.543,
+    4000.196
+  ],
+  "mean_ms": 3961.341
+}

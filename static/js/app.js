@@ -10,8 +10,7 @@
  *      (no Flask/Socket.IO server involved), with a polling fallback if
  *      Realtime is unavailable.
  *   5. Uploading media through /api/media/upload (Cloudinary).
- *   6. A sketch of WebRTC call signalling over a Supabase Realtime Broadcast
- *      channel (NOT wired into the UI — see the bottom of this file).
+ *   6. Voice/video calling over private Supabase Realtime signalling channels.
  *
  * ENCRYPTION: two schemes live side by side; each message says which one sealed it.
  *   - Secure keys (default for direct chats where both people have keys): every
@@ -43,7 +42,7 @@ const JC = window.JoschatCrypto;
 const POLL_INTERVAL_MS = 4000;
 
 // Mirrors the server: 25 MB ceiling and the same allowed extensions.
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 24 * 1024 * 1024;
 const ALLOWED_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm", "mp3", "wav", "ogg", "m4a"]);
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
 const VIDEO_EXT = new Set(["mp4", "mov", "webm"]);
@@ -70,6 +69,7 @@ let conversations = null;         // null = not loaded yet, [] = loaded but empt
 let messageStore = [];            // messages of the open conversation, oldest first
 const derivedKeys = new Map();    // conversationId -> CryptoKey
 const plainCache = new Map();     // messageId -> decrypted text (or undefined if it failed)
+const mediaInFlight = new Map();
 const mediaCache = new Map();     // messageId -> {url, ...} once decrypted+trusted (or undefined if it failed)
 const messageStatus = new Map();  // messageId -> "verified" | "tampered" (session only)
 const expandedBlocks = new Set(); // messageIds whose block details are open
@@ -86,9 +86,12 @@ let keysPanelOpen = false;        // the "secured with your keys" details are sh
 let pendingFile = null;
 let pendingThumbUrl = null;
 let sending = false;
+const attachmentFailures = new Set();
 let verifying = false;
 let autoVerifyTimer = null;
 let currentIsGroup = false;
+let currentGroupEpoch = 1;
+let currentGroupOwner = null;
 let queuedRows = [];
 let outboxRefreshing = null;
 let historyPushed = false;
@@ -433,8 +436,13 @@ function showChatHome() {
   showView("chat");
   showList();
   keysReady = initMyKeys();
-  loadConversations();
+  loadConversations().then(() => {
+    const id = Number(new URLSearchParams(location.search).get("conversation"));
+    const conv = conversations?.find(c => c.id === id);
+    if (conv) openConversation(id, conversationLabel(conv), conversationAvatarName(conv));
+  });
   subscribeToIncomingCalls();
+  checkIncomingCall();
 }
 
 function setSetupError(text) {
@@ -561,6 +569,8 @@ async function restoreSession() {
 
 async function signOut(message, { preserveQueue = false } = {}) {
   const token = accessToken;
+  disableNotifications(token).catch(() => {});
+  closeCallDialog("profile-dialog"); closeCallDialog("manage-group-dialog");
   const owner = currentProfile && currentProfile.id;
   closeConversation();
   teardownCall(null);
@@ -574,7 +584,11 @@ async function signOut(message, { preserveQueue = false } = {}) {
   participantKeys = {};
   keysPanelOpen = false;
   derivedKeys.clear();
+  groupReadingKeyCache.clear();
+  for (const key of Object.keys(sessionStorage)) if (key.startsWith(PASSPHRASE_KEY_PREFIX)) sessionStorage.removeItem(key);
+  attachmentFailures.clear();
   plainCache.clear();
+  for (const value of mediaCache.values()) if (value && value.blobUrl) URL.revokeObjectURL(value.blobUrl);
   mediaCache.clear();
   messageStatus.clear();
   drafts.clear();
@@ -606,7 +620,7 @@ function normalizePhone(value) {
 function outboxRequest(type, detail = {}) {
   const worker = navigator.serviceWorker && navigator.serviceWorker.controller;
   const owner = detail.owner_id || (currentProfile && currentProfile.id);
-  if (!worker || !owner) return Promise.resolve({ rows: [] });
+  if (!worker || (!owner && type !== "NOTIFICATION_OWNER")) return Promise.resolve({ rows: [] });
   return new Promise((resolve, reject) => {
     const channel = new MessageChannel();
     const timer = setTimeout(() => { channel.port1.close(); reject(new Error("Outbox unavailable")); }, 20000);
@@ -929,7 +943,7 @@ function base64ToBytes(b64) {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-async function deriveKey(passphrase, conversationId) {
+async function deriveKey(passphrase, conversationId, epoch = null) {
   const material = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]
   );
@@ -937,7 +951,7 @@ async function deriveKey(passphrase, conversationId) {
     {
       name: "PBKDF2",
       // Per-conversation salt so the same passphrase never yields the same key twice.
-      salt: new TextEncoder().encode(`joschat:conversation:${conversationId}`),
+      salt: new TextEncoder().encode(`joschat:conversation:${conversationId}${epoch === null ? "" : ":epoch:" + epoch}`),
       iterations: 200000,
       hash: "SHA-256",
     },
@@ -954,6 +968,7 @@ function getConversationKey() {
 
 async function encryptText(plaintext) {
   const key = getConversationKey();
+  if (currentIsGroup) return `g3.${currentGroupEpoch}.` + await JC.encrypt(key, plaintext, currentConversationId, currentProfile.id);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext)
@@ -984,7 +999,17 @@ async function decryptWith(key, b64) {
 // have no marker; secure-key ciphertext starts "e2." (see crypto.js).
 async function ensureDecrypted(cache, msg, ciphertext) {
   if (cache.has(msg.id)) return;
-  if (JC.isV2(ciphertext)) {
+  if (ciphertext.startsWith("g3.")) {
+    const match = /^g3\.(\d+)\.(e2\..+)$/.exec(ciphertext);
+    if (!match) { cache.set(msg.id, undefined); return; }
+    const keys = await groupReadingKeys(msg.conversation_id, Number(match[1]));
+    if (!keys.length) return;
+    for (const key of keys) {
+      const text = await JC.decrypt(key, match[2], msg.conversation_id, msg.sender_id);
+      if (text !== undefined) { cache.set(msg.id,text); return; }
+    }
+    cache.set(msg.id,undefined);
+  } else if (JC.isV2(ciphertext)) {
     const keys = keyInfo ? keyInfo.decryptKeys : [];
     if (!keys.length) return;
     // A contact who changed keys leaves older messages sealed under their previous key.
@@ -994,9 +1019,13 @@ async function ensureDecrypted(cache, msg, ciphertext) {
     }
     cache.set(msg.id, undefined);
   } else {
-    const key = getConversationKey();
-    if (!key) return;
-    cache.set(msg.id, await decryptWith(key, ciphertext));
+    const keys = currentIsGroup ? await groupReadingKeys(msg.conversation_id, null) : [getConversationKey()].filter(Boolean);
+    if (!keys.length) return;
+    for (const key of keys) {
+      const text = await decryptWith(key,ciphertext);
+      if (text !== undefined) { cache.set(msg.id,text); return; }
+    }
+    cache.set(msg.id,undefined);
   }
 }
 
@@ -1004,12 +1033,14 @@ async function ensurePlain(msg) {
   await ensureDecrypted(plainCache, msg, msg.encrypted_content);
 }
 
-// Decrypts an attachment's reference (see "Encrypted media" in the README: the
-// message row carries only ciphertext of {url, public_id, ...}; the file itself is
-// NOT encrypted on Cloudinary). Once decrypted, the URL must also point at this
-// app's own Cloudinary account — the server validated that for legacy plaintext
-// media_url, but cannot for ciphertext it can't read, so the client checks instead.
+// Decrypt the sealed file reference, fetch the encrypted container from trusted
+// storage, verify its digest, then authenticate/decrypt into a local blob URL.
 async function ensureMedia(msg) {
+  if (mediaInFlight.has(msg.id)) return mediaInFlight.get(msg.id);
+  const promise = loadMedia(msg).finally(() => mediaInFlight.delete(msg.id));
+  mediaInFlight.set(msg.id, promise); return promise;
+}
+async function loadMedia(msg) {
   if (!msg.encrypted_media || mediaCache.has(msg.id)) return;
   await ensureDecrypted(mediaCache, msg, msg.encrypted_media);
   if (!mediaCache.has(msg.id)) return;             // still locked
@@ -1018,6 +1049,26 @@ async function ensureMedia(msg) {
   try {
     const info = JSON.parse(raw);
     if (typeof info.url !== "string" || !isTrustedMediaUrl(info.url)) throw new Error("untrusted media URL");
+    if (info.version === 1) {
+      if (!Number.isInteger(info.size) || info.size < 0 || info.size > MAX_UPLOAD_BYTES ||
+          !ALLOWED_EXT.has(extOf(info.name || ""))) throw new Error("Invalid attachment metadata");
+      const response = await fetch(info.url, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store" });
+      if (!response.ok) throw new Error("Attachment unavailable");
+      const reader = response.body.getReader(); const chunks = []; let total = 0;
+      while (true) {
+        const { value, done } = await reader.read(); if (done) break;
+        total += value.length;
+        if (total > MAX_UPLOAD_BYTES + 32) { await reader.cancel(); throw new Error("Oversized attachment"); }
+        chunks.push(value);
+      }
+      const bytes = await new Blob(chunks).arrayBuffer();
+      let plain;
+      try { plain = await JC.decryptAttachment(bytes, info, msg.conversation_id, msg.sender_id); }
+      catch (error) { attachmentFailures.add(msg.id); messageStatus.set(msg.id, "tampered"); throw error; }
+      if (plain.byteLength !== info.size) { attachmentFailures.add(msg.id); messageStatus.set(msg.id, "tampered"); throw new Error("Attachment size mismatch"); }
+      const mime = /^(image\/(png|jpeg|gif|webp)|video\/(mp4|quicktime|webm)|audio\/(mpeg|wav|ogg|mp4|x-m4a))$/.test(info.type) ? info.type : "application/octet-stream";
+      info.blobUrl = URL.createObjectURL(new Blob([plain], { type: mime }));
+    }
     mediaCache.set(msg.id, info);
   } catch (err) {
     console.warn("Rejected an attachment reference", err);
@@ -1045,7 +1096,7 @@ function resolveMedia(msg) {
   if (msg.encrypted_media) {
     if (!mediaCache.has(msg.id)) return { state: "locked" };
     const info = mediaCache.get(msg.id);
-    return info ? { state: "ready", url: info.url } : { state: "failed" };
+    return info ? { state: "ready", url: info.blobUrl || info.url, info } : { state: "failed" };
   }
   if (msg.media_url) {   // a message sent before encrypted_media existed
     const url = safeHttpsUrl(msg.media_url);
@@ -1194,6 +1245,7 @@ async function acceptNewPeerKey() {
   savePeerKeyHistory(peerId, [peerKey, ...peerKeyHistory(peerId).filter((k) => k !== peerKey)]);
   keyInfo = await computeKeyState();
   plainCache.clear();
+  for (const value of mediaCache.values()) if (value && value.blobUrl) URL.revokeObjectURL(value.blobUrl);
   mediaCache.clear();
   updateLockUI();
   await renderAllMessages();
@@ -1291,7 +1343,8 @@ async function setUpKeysOnThisDevice() {
     if (currentConversationId !== null) {
       keyInfo = await computeKeyState();
       plainCache.clear();
-      mediaCache.clear();
+      for (const value of mediaCache.values()) if (value && value.blobUrl) URL.revokeObjectURL(value.blobUrl);
+  mediaCache.clear();
       updateLockUI();
       await renderAllMessages();
     }
@@ -1428,16 +1481,16 @@ async function applyPassphrase(event) {
   const btn = $("unlock-btn");
   setBusy(btn, true);
   try {
-    const key = await deriveKey(passphrase, conversationId);
+    const key = await deriveKey(passphrase, conversationId, currentIsGroup ? currentGroupEpoch : null);
 
     // If the chat already has messages, make sure this passphrase opens at least
     // one of them. Otherwise it is almost certainly a typo, and accepting it
     // would make you send messages the other person can't read.
-    const sample = messageStore.filter((m) => !JC.isV2(m.encrypted_content)).slice(-20);
+    const sample = messageStore.filter((m) => currentIsGroup ? m.encrypted_content.startsWith(`g3.${currentGroupEpoch}.`) : !JC.isV2(m.encrypted_content)).slice(-20);
     if (sample.length) {
       let opensSomething = false;
       for (const m of sample) {
-        if ((await decryptWith(key, m.encrypted_content)) !== undefined) { opensSomething = true; break; }
+        if ((await (currentIsGroup ? JC.decrypt(key, m.encrypted_content.replace(/^g3\.\d+\./, ""), m.conversation_id, m.sender_id) : decryptWith(key, m.encrypted_content))) !== undefined) { opensSomething = true; break; }
       }
       if (!opensSomething) {
         return setUnlockError(`That passphrase doesn't open these messages. Check it with ${otherName()} and try again.`);
@@ -1445,10 +1498,12 @@ async function applyPassphrase(event) {
     }
     if (currentConversationId !== conversationId) return;
 
+    if (currentIsGroup) rememberGroupPassphrase(conversationId,passphrase);
     derivedKeys.set(conversationId, key);
-    try { sessionStorage.setItem(PASSPHRASE_KEY_PREFIX + conversationId, passphrase); } catch { /* ignore */ }
+    try { sessionStorage.setItem(PASSPHRASE_KEY_PREFIX + conversationId, passphrase); sessionStorage.setItem(PASSPHRASE_KEY_PREFIX + conversationId + "_epoch", String(currentGroupEpoch)); } catch { /* ignore */ }
     plainCache.clear();
-    mediaCache.clear();
+    for (const value of mediaCache.values()) if (value && value.blobUrl) URL.revokeObjectURL(value.blobUrl);
+  mediaCache.clear();
     unlockOpen = false;
     $("conv-passphrase").value = "";
     updateLockUI();
@@ -1502,8 +1557,8 @@ function renderMessageSkeletons() {
   });
 }
 
-async function openConversation(conversationId, label, avatarName) {
-  if (currentConversationId === conversationId && !$("thread-view").hidden) {
+async function openConversation(conversationId, label, avatarName, force = false) {
+  if (!force && currentConversationId === conversationId && !$("thread-view").hidden) {
     showThread();
     return;
   }
@@ -1511,6 +1566,7 @@ async function openConversation(conversationId, label, avatarName) {
   currentConversationId = conversationId;
   messageStore = [];
   plainCache.clear();
+  for (const value of mediaCache.values()) if (value && value.blobUrl) URL.revokeObjectURL(value.blobUrl);
   mediaCache.clear();
   messageStatus.clear();
   expandedBlocks.clear();
@@ -1544,20 +1600,20 @@ async function openConversation(conversationId, label, avatarName) {
   showThread();
   renderConversationList();   // moves the highlight
 
-  // Restore this tab's passphrase for the conversation, if it was entered before.
-  let saved = null;
-  try { saved = sessionStorage.getItem(PASSPHRASE_KEY_PREFIX + conversationId); } catch { /* ignore */ }
-  if (saved && !derivedKeys.has(conversationId)) {
-    derivedKeys.set(conversationId, await deriveKey(saved, conversationId));
-  }
-  if (currentConversationId !== conversationId) return;
-
   // Who is in this conversation (for sender names, and their public keys).
   const infoRes = await apiFetch(`/conversations/${conversationId}`);
   if (!infoRes || currentConversationId !== conversationId) return;
   if (infoRes.ok) {
     const info = await infoRes.json();
     currentIsGroup = Boolean(info.conversation && info.conversation.is_group);
+    currentGroupEpoch = info.conversation.key_epoch || 1;
+    currentGroupOwner = info.conversation.created_by;
+    $("manage-group-btn").hidden = !currentIsGroup;
+    let saved = sessionStorage.getItem(PASSPHRASE_KEY_PREFIX + conversationId);
+    if (currentIsGroup && saved && sessionStorage.getItem(PASSPHRASE_KEY_PREFIX + conversationId + "_epoch") !== String(currentGroupEpoch)) {
+      derivedKeys.delete(conversationId); sessionStorage.removeItem(PASSPHRASE_KEY_PREFIX + conversationId); saved = null;
+    }
+    if (saved && !derivedKeys.has(conversationId)) derivedKeys.set(conversationId, await deriveKey(saved, conversationId, currentIsGroup ? currentGroupEpoch : null));
     $("group-members").hidden = !currentIsGroup;
     $("group-members").textContent = `${info.participants.length} members · ${info.participants.map((p) => "@" + p.username).join(", ")}`;
     $("group-members").title = $("group-members").textContent;
@@ -1675,6 +1731,7 @@ async function refreshMessages() {
 
 async function addMessages(messages, opts = {}) {
   let changed = false;
+  checkMessagePins(messages);
   for (const msg of messages) {
     const old = messageStore.find((m) => m.id === msg.id);
     if (old && !msg.queued) {
@@ -1684,7 +1741,7 @@ async function addMessages(messages, opts = {}) {
       Object.assign(old, msg);
     }
     if (typeof msg.verified === "boolean") {
-      const status = msg.verified ? "verified" : "tampered";
+      const status = (msg.verified && !attachmentFailures.has(msg.id)) ? "verified" : "tampered";
       if (messageStatus.get(msg.id) !== status) changed = true;
       messageStatus.set(msg.id, status);
     }
@@ -1697,7 +1754,7 @@ async function addMessages(messages, opts = {}) {
   messageStore = messageStore.filter((m) => !m.queued || !delivered.has(m.client_message_id));
   messageStore.push(...fresh);
   for (const msg of messages) {
-    if (typeof msg.verified === "boolean") messageStatus.set(msg.id, msg.verified ? "verified" : "tampered");
+    if (typeof msg.verified === "boolean") messageStatus.set(msg.id, (msg.verified && !attachmentFailures.has(msg.id)) ? "verified" : "tampered");
   }
   messageStore.sort((a, b) => a.queued && b.queued ? a.created_at.localeCompare(b.created_at) : a.queued ? 1 : b.queued ? -1 : a.id - b.id);
   const sentByMe = fresh.some((m) => currentProfile && m.sender_id === currentProfile.id);
@@ -1824,7 +1881,8 @@ function buildMessageItem(msg, contPrev, contNext, isGroup) {
   bubble.className = "bubble";
 
   const media = resolveMedia(msg);
-  if (media.state === "ready") bubble.appendChild(buildMedia(media.url));
+  if (media.state === "ready") bubble.appendChild(buildMedia(media.url, media.info));
+  if (msg.legacy_attachment) bubble.appendChild(buildMediaPlaceholder("alert", "Legacy attachment: originally uploaded without file encryption."));
   else if (media.state === "locked") bubble.appendChild(buildMediaPlaceholder("lock", "Attachment locked"));
   else if (media.state === "failed") bubble.appendChild(buildMediaPlaceholder("alert", "Can't load this attachment"));
 
@@ -1892,9 +1950,9 @@ function extOf(pathname) {
   return m ? m[1].toLowerCase() : "";
 }
 
-function buildMedia(href) {
+function buildMedia(href, info = {}) {
   const url = new URL(href);
-  const ext = extOf(url.pathname);
+  const ext = extOf(info.name || url.pathname);
   const wrap = document.createElement("div");
   wrap.className = "media";
 
@@ -1916,7 +1974,7 @@ function buildMedia(href) {
   } else {
     const a = document.createElement("a");
     a.className = "file-chip";
-    a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.href = href; a.download = info.name || "attachment"; a.rel = "noopener noreferrer";
     a.append(iconSvg("file"), document.createTextNode("Open attachment"));
     wrap.appendChild(a);
   }
@@ -2016,21 +2074,19 @@ async function sendMessage() {
 
     let encrypted_media = null;
     if (pendingFile) {
-      // The FILE ITSELF is uploaded as-is (see README, "Encrypted media" — this is the
-      // cheaper of two designs). What's encrypted is the reference to it: without the
-      // conversation's key, the message row alone does not say where the attachment is.
+      const file = pendingFile;
+      const sealed = await JC.encryptAttachment(await file.arrayBuffer(), conversationId, currentProfile.id);
       const form = new FormData();
-      form.append("file", pendingFile);
+      form.append("file", new Blob([sealed.bytes], { type: "application/octet-stream" }), "attachment.jcm");
+      form.append("encrypted", "1");
       form.append("conversation_id", conversationId);
       const uploadRes = await apiFetch("/media/upload", { method: "POST", body: form });
       if (!uploadRes) return;
       const uploadData = await readJson(uploadRes);
       if (!uploadRes.ok) return toast(`Upload failed: ${uploadData.error}`, "error");
       encrypted_media = await seal(JSON.stringify({
-        url: uploadData.secure_url,
-        public_id: uploadData.public_id,
-        resource_type: uploadData.resource_type,
-        format: uploadData.format,
+        version: 1, url: uploadData.secure_url, public_id: uploadData.public_id,
+        key: sealed.key, digest: sealed.digest, name: file.name, type: file.type, size: file.size,
       }));
     }
 
@@ -2046,6 +2102,7 @@ async function sendMessage() {
         encrypted_content,
         encrypted_media,
         client_message_id,
+        group_epoch: currentIsGroup ? currentGroupEpoch : null,
       }),
     });
     if (!res) return;
@@ -2129,8 +2186,11 @@ async function verifyChain({ automatic = false } = {}) {
     // which messages were checked and what each one turned out to be.
     const step = automatic || reduceMotion ? 0 : Math.max(10, Math.min(70, Math.floor(1500 / outcome.length)));
     let bad = 0;
-    for (const [id, ok] of outcome) {
+    for (let [id, ok] of outcome) {
       if (currentConversationId !== conversationId) return;
+      if (attachmentFailures.has(id)) ok = false;
+      const media = mediaCache.get(id);
+      if (media && media.version === 1 && !media.blobUrl) ok = false;
       messageStatus.set(id, ok ? "verified" : "tampered");
       if (!ok) bad += 1;
       const seal = document.querySelector(`#messages .seal[data-msg-id="${id}"]`);
@@ -2145,9 +2205,11 @@ async function verifyChain({ automatic = false } = {}) {
       if (step) await sleep(step);
     }
 
+    if (data.legacy_attachments && !automatic) showVerifyBanner(`${data.legacy_attachments} legacy attachment(s): references verified; original files were not encrypted.`, false);
+    if (data.missing_messages) { bad += data.missing_messages; showVerifyBanner(`${data.missing_messages} message(s) are missing from the ledger history.`, true); }
     const total = outcome.length;
     checkedMessages = total;
-    if (bad === 0 && !automatic) {
+    if (bad === 0 && !automatic && !data.legacy_attachments) {
       showVerifyBanner(
         total === 1 ? "The message passed its integrity check." : `All ${total} messages passed their integrity checks.`,
         false
@@ -2185,6 +2247,7 @@ function onSealClick(event) {
 // ---------------------------------------------------------------------------
 
 function bindEvents() {
+  bindCompletionEvents();
   // Auth
   $("auth-form").addEventListener("submit", submitAuth);
   $("tab-login").addEventListener("click", () => setMode("login"));
@@ -2407,6 +2470,12 @@ function subscribeToIncomingCalls() {
     .subscribe();
 }
 
+async function checkIncomingCall() {
+  if (!currentProfile || activeCall || navigator.onLine === false) return;
+  const res = await apiFetch("/calls/incoming");
+  if (res?.ok) { const data = await readJson(res); if (data.call && !activeCall) onIncomingCallRow(data.call); }
+}
+
 function unsubscribeFromIncomingCalls() {
   const client = ensureSupabaseClient();
   if (callsChannel && client) client.removeChannel(callsChannel);
@@ -2452,7 +2521,7 @@ async function onIncomingCallRow(row) {
 // but wasted, so `phase` guards against acting twice on the same outcome.
 function onCallRowChanged(row) {
   if (!activeCall || activeCall.id !== row.id) return;
-  if (row.status === "connected" && activeCall.role === "caller" && activeCall.phase === "ringing-out") {
+  if ((row.status === "accepted" || row.status === "connected") && activeCall.role === "caller" && activeCall.phase === "ringing-out") {
     setCallStatusText("Connecting…");   // the SDP itself still arrives over the broadcast channel
   }
   if (row.status === "missed" || row.status === "ended" || row.status === "failed") {
@@ -2507,7 +2576,7 @@ async function startOutgoingCall(type) {
   updateCallAvailability();
   showActiveCallDialog();
   setCallStatusText("Ringing…");
-  joinCallChannel();
+  joinCallChannel().catch(() => { if (activeCall) { endCallRow(activeCall.id,"failed"); teardownCall("Could not join the secure call."); } });
   activeCall.ringTimer = setTimeout(() => {
     if (activeCall && activeCall.phase === "ringing-out") {
       endCallRow(activeCall.id, "missed");
@@ -2534,8 +2603,11 @@ async function acceptIncomingCall() {
   hideIncomingCallDialog();
   showActiveCallDialog();
   setCallStatusText("Connecting…");
-  joinCallChannel();
-  apiFetch(`/calls/${activeCall.id}/accept`, { method: "POST" });   // the call log; live progress is the broadcast channel
+  const call = activeCall;
+  const accepted = await apiFetch(`/calls/${call.id}/accept`, { method: "POST" });
+  if (activeCall !== call) return;
+  if (!accepted?.ok) { endCallRow(call.id,"failed"); teardownCall("Could not accept the call."); return; }
+  joinCallChannel().catch(() => { if (activeCall === call) { endCallRow(call.id,"failed"); teardownCall("Could not join the secure call."); } });
 }
 
 function declineActiveCall(status) {
@@ -2553,12 +2625,19 @@ function hangUpActiveCall() {
 
 // --- the peer connection and its signalling channel --------------------------
 
-function joinCallChannel() {
+async function joinCallChannel() {
   const client = ensureSupabaseClient();
   const call = activeCall;
   let offerSent = false;
 
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  const response = await apiFetch("/calls/ice");
+  const config = response?.ok ? await readJson(response) : {};
+  if (activeCall !== call) return;
+  const pc = new RTCPeerConnection({ iceServers: config.ice_servers || [{ urls: "stun:stun.l.google.com:19302" }] });
+  const pendingIce = [];
+  const applyRemote = async (description) => { await pc.setRemoteDescription(description); while (pendingIce.length) await pc.addIceCandidate(pendingIce.shift()); };
+  const signalFailure = () => { if (activeCall !== call) return; endCallRow(call.id, "failed"); teardownCall("Could not establish a secure call. Retry when connected."); };
+  call.connectTimer = setTimeout(() => { if (activeCall === call && call.phase !== "connected") signalFailure(); }, 60000);
   call.pc = pc;
   call.localStream.getTracks().forEach((track) => pc.addTrack(track, call.localStream));
 
@@ -2574,6 +2653,8 @@ function joinCallChannel() {
     if (activeCall !== call) return;
     if (pc.connectionState === "connected" && call.phase !== "connected") {
       call.phase = "connected";
+      clearTimeout(call.connectTimer);
+      apiFetch(`/calls/${call.id}/connected`, { method: "POST" });
       call.startedAt = Date.now();
       clearTimeout(call.ringTimer);
       startDurationTimer();
@@ -2583,38 +2664,39 @@ function joinCallChannel() {
     }
   };
 
-  const channel = client.channel(`call-${call.id}`, { config: { broadcast: { self: false }, presence: { key: currentProfile.id } } });
+  const channel = client.channel(`call-${call.id}`, { config: { private: true, broadcast: { self: false, ack: true }, presence: { key: currentProfile.id } } });
   call.channel = channel;
 
   channel
     .on("broadcast", { event: "offer" }, async ({ payload }) => {
       if (activeCall !== call || call.role !== "callee") return;
-      await pc.setRemoteDescription(payload);
+      try { await applyRemote(payload); } catch { signalFailure(); return; }
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       channel.send({ type: "broadcast", event: "answer", payload: answer });
     })
     .on("broadcast", { event: "answer" }, async ({ payload }) => {
       if (activeCall !== call || call.role !== "caller") return;
-      await pc.setRemoteDescription(payload);
+      try { await applyRemote(payload); } catch { signalFailure(); return; }
     })
     .on("broadcast", { event: "ice-candidate" }, async ({ payload }) => {
       if (activeCall !== call) return;
-      try { await pc.addIceCandidate(payload); } catch (err) { console.warn("Bad ICE candidate", err); }
+      try { if (pc.remoteDescription) await pc.addIceCandidate(payload); else if (pendingIce.length < 100) pendingIce.push(payload); } catch (err) { console.warn("Bad ICE candidate", err); }
     })
     .on("presence", { event: "sync" }, async () => {
       // Only the caller ever sends an offer (avoids two offers colliding), and
       // only once presence proves the callee has actually joined this channel.
       if (activeCall !== call || offerSent || call.role !== "caller") return;
-      const others = Object.keys(channel.presenceState()).filter((key) => key !== currentProfile.id);
-      if (!others.length) return;
+      if (!Object.prototype.hasOwnProperty.call(channel.presenceState(), call.peerId)) return;
       offerSent = true;
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       channel.send({ type: "broadcast", event: "offer", payload: offer });
     })
     .subscribe(async (status) => {
+      if (activeCall !== call) return;
       if (status === "SUBSCRIBED") await channel.track({ online_at: Date.now() });
+      else if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) signalFailure();
     });
 }
 
@@ -2623,6 +2705,7 @@ function teardownCall(message) {
   const call = activeCall;
   activeCall = null;
   clearTimeout(call.ringTimer);
+  clearTimeout(call.connectTimer);
   clearInterval(call.durationTimer);
   if (call.pc) { try { call.pc.close(); } catch { /* already closed */ } }
   if (call.localStream) call.localStream.getTracks().forEach((t) => t.stop());

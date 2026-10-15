@@ -184,6 +184,7 @@ async function boot() {
   $("admin-whoami").textContent = `Signed in as @${profile.username}`;
   showShell();
   loadStats();
+  loadAudits();
   loadConversations();
   loadUsers();
 }
@@ -265,11 +266,16 @@ async function validateChain() {
       return;
     }
     const report = await res.json();
+    try {
+      const pin = JSON.parse(localStorage.getItem("joschat-admin-ledger-pin") || "null");
+      if (pin && (report.blocks_checked < pin.count || (report.blocks_checked === pin.count && report.head_hash !== pin.hash))) report.is_valid = false;
+      if (report.is_valid) localStorage.setItem("joschat-admin-ledger-pin", JSON.stringify({count:report.blocks_checked,hash:report.head_hash}));
+    } catch {}
     renderAuditResult($("chain-audit-result"), {
       good: report.is_valid,
       lines: report.is_valid
-        ? [`All ${report.blocks_checked} blocks verified. The chain is intact.`]
-        : [`Tampering detected at block ${report.invalid_index}.`, `${report.blocks_checked} blocks checked.`],
+        ? [`All ${report.blocks_checked} blocks, message payloads and signed receipts verified. ${report.legacy_attachments || 0} legacy attachments retain their original encryption limits.`]
+        : [(report.invalid_index === null ? "The ledger differs from its earlier checkpoint." : `Integrity failure at block ${report.invalid_index}.`), `${report.blocks_checked} blocks checked.`],
     });
   } finally {
     btn.disabled = false;
@@ -306,7 +312,7 @@ async function validateConversation(idOverride) {
       lines: report.all_verified
         ? [`All ${report.messages_checked} messages in conversation ${report.conversation_id} verified.`]
         : [
-            `${report.flagged_message_ids.length} of ${report.messages_checked} messages failed verification in conversation ${report.conversation_id}.`,
+            `${report.missing_messages || 0} messages missing; ${report.flagged_message_ids.length} of ${report.messages_checked} messages failed verification in conversation ${report.conversation_id}.`,
             `Flagged message IDs: ${report.flagged_message_ids.join(", ")}`,
           ],
     });
@@ -473,6 +479,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("admin-theme-btn").addEventListener("click", toggleTheme);
   $("admin-signout-btn").addEventListener("click", signOut);
   $("validate-chain-btn").addEventListener("click", validateChain);
+  $("refresh-audits-btn").addEventListener("click", loadAudits);
+  $("export-report-btn").addEventListener("click", async () => {
+    const res = await apiFetch("/admin/report"); if (!res?.ok) return toast("Could not export the report.", "error");
+    const url = URL.createObjectURL(await res.blob()); const a = document.createElement("a"); a.href = url; a.download = "joschat-integrity-report.json"; a.click(); setTimeout(() => URL.revokeObjectURL(url),1000); loadAudits();
+  });
   $("validate-conversation-btn").addEventListener("click", () => validateConversation());
   $("conversation-audit-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") validateConversation();
@@ -480,3 +491,12 @@ document.addEventListener("DOMContentLoaded", () => {
   $("user-search").addEventListener("input", renderUsers);
   boot();
 });
+
+async function loadAudits() {
+  const res = await apiFetch("/admin/audits"); if (!res?.ok) return;
+  const {audits} = await res.json(); const list = $("audit-history"); list.replaceChildren();
+  for (const audit of audits) {
+    const item = document.createElement("li"); item.textContent = `${new Date(audit.created_at).toLocaleString()} · ${audit.source} · ${audit.report.is_valid ? "Passed" : "Needs attention"} · ${audit.report.blocks_checked} blocks · ${audit.report.duration_ms} ms`; list.append(item);
+  }
+  if (!audits.length) list.textContent = "No audits recorded yet.";
+}

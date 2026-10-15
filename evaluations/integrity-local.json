@@ -1,0 +1,66 @@
+{
+  "generated_at": "2026-10-15T23:01:36.417259+00:00",
+  "environment": "Disposable local SQL engine; not a Jos mobile-network pilot",
+  "sql_version": "PostgreSQL 18.3 (PGlite 0.5.8) on wasm32-unknown-emscripten, compiled by emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 3.1.74 (1092ec30a3fb1d46b1782ff1b4db5094d3d06ae5), 32-bit",
+  "tamper_detection": {
+    "detected": 7,
+    "attempted": 7,
+    "cases": [
+      {
+        "case": "text_ciphertext",
+        "detected": true
+      },
+      {
+        "case": "attachment_reference",
+        "detected": true
+      },
+      {
+        "case": "message_deleted",
+        "detected": true
+      },
+      {
+        "case": "block_hash",
+        "detected": true
+      },
+      {
+        "case": "tail_deleted",
+        "detected": true
+      },
+      {
+        "case": "index_gap",
+        "detected": true
+      },
+      {
+        "case": "coherent_database_rewrite",
+        "detected": true
+      }
+    ]
+  },
+  "false_positive_rate": {
+    "flagged": 0,
+    "untampered": 1000
+  },
+  "chain_validation": [
+    {
+      "blocks": 10,
+      "repeats": 5,
+      "mean_ms": 12.122,
+      "min_ms": 6.96,
+      "max_ms": 23.708
+    },
+    {
+      "blocks": 100,
+      "repeats": 5,
+      "mean_ms": 43.483,
+      "min_ms": 26.212,
+      "max_ms": 69.491
+    },
+    {
+      "blocks": 1000,
+      "repeats": 5,
+      "mean_ms": 181.671,
+      "min_ms": 164.439,
+      "max_ms": 211.48
+    }
+  ]
+}

@@ -22,8 +22,9 @@ from flask import Blueprint, request, jsonify, g
 
 from config import Config
 from extensions import db_cursor
-from blockchain import hash_message
+from utils.integrity import payload_hash, seal_message, verify_receipts
 from utils.auth_helpers import require_auth
+from utils.notifications import queue_notification, dispatch_safely
 
 messages_bp = Blueprint("messages", __name__)
 
@@ -55,10 +56,8 @@ def send_message():
     encrypted_content = data.get("encrypted_content")
     media_url = data.get("media_url")
     media_public_id = data.get("media_public_id")
-    # Ciphertext of {url, public_id, resource_type, format}, sealed client-side with
-    # the same scheme (secure keys or shared passphrase) as encrypted_content, so the
-    # attachment's location isn't sitting in the message row as plain text. The file
-    # itself still lives on Cloudinary unencrypted — see README, "Encrypted media".
+    # Sealed file URL, random file key, digest and original metadata. The file
+    # bytes have already been encrypted on the sender's device.
     encrypted_media = data.get("encrypted_media")
     client_message_id = data.get("client_message_id")
     if client_message_id is not None:
@@ -85,11 +84,16 @@ def send_message():
     ):
         return jsonify({"error": f"encrypted_media must be a string up to {MAX_ENCRYPTED_MEDIA_CHARS} characters"}), 400
 
-    message_hash = hash_message(encrypted_content)
+    if media_url is not None or media_public_id is not None:
+        return jsonify({"error": "New attachments must be encrypted before upload"}), 400
+    message_hash = payload_hash(encrypted_content, encrypted_media, media_url, media_public_id)
 
     with db_cursor(commit=True) as cur:
         if not _is_participant(cur, conversation_id, g.profile["id"]):
             return jsonify({"error": "Not a participant in this conversation"}), 403
+
+        cur.execute("SELECT is_group, key_epoch FROM conversations WHERE id = %s FOR SHARE", (conversation_id,))
+        conversation = cur.fetchone()
 
         if client_message_id:
             # Serialize retries of the same sender/id before appending a block.
@@ -108,9 +112,13 @@ def send_message():
                     "media_public_id": media_public_id,
                 }.items()):
                     return jsonify({"error": "client_message_id was already used for another message"}), 409
+                verify_receipts(cur, [existing])
                 return jsonify({"message": dict(existing), "duplicate": True,
                                 "block_hash": existing["block_hash"],
                                 "block_index": existing["block_index"]}), 200
+
+        if conversation["is_group"] and data.get("group_epoch") != conversation["key_epoch"]:
+            return jsonify({"error": "Group membership changed. Open the group and unlock its current passphrase."}), 409
 
         # Atomically append a block for this message's hash. See
         # add_block() in supabase/schema.sql — a single locked
@@ -130,8 +138,8 @@ def send_message():
             """
             INSERT INTO messages
                 (conversation_id, sender_id, encrypted_content, media_url,
-                 media_public_id, encrypted_media, block_index, block_hash, client_message_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 media_public_id, encrypted_media, block_index, block_hash, client_message_id, integrity_version)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 2)
             RETURNING *
             """,
             (
@@ -140,10 +148,15 @@ def send_message():
             ),
         )
         message = cur.fetchone()
+        seal_message(cur, message)
         cur.execute("SELECT validate_message(%s) AS verified", (message["id"],))
         message["verified"] = cur.fetchone()["verified"]
+        if Config.VAPID_PRIVATE_KEY:
+            cur.execute("SELECT user_id FROM conversation_participants WHERE conversation_id = %s AND user_id <> %s", (conversation_id, g.profile["id"]))
+            queue_notification(cur, [r["user_id"] for r in cur.fetchall()], f"message:{message['id']}", conversation_id)
 
-    # No Flask-side push needed: the `messages` table is registered with
+    dispatch_safely()
+    # Realtime delivers open-chat updates: the `messages` table is registered with
     # Supabase Realtime (see schema.sql), so any client subscribed to
     # `postgres_changes` for this conversation_id receives this insert
     # directly from Supabase within milliseconds.
@@ -193,6 +206,7 @@ def get_messages(conversation_id):
                 (conversation_id, limit),
             )
         rows = cur.fetchall()
+        verify_receipts(cur, rows)
 
     return jsonify({"messages": [dict(r) for r in reversed(rows)]}), 200
 
@@ -213,16 +227,21 @@ def verify_conversation(conversation_id):
             return jsonify({"error": "Not a participant in this conversation"}), 403
 
         if ids is None:
-            cur.execute("SELECT * FROM validate_conversation(%s)", (conversation_id,))
+            cur.execute("SELECT m.*, m.id AS message_id, validate_message(m.id) AS verified FROM messages m WHERE conversation_id = %s ORDER BY id", (conversation_id,))
         else:
-            cur.execute("SELECT id AS message_id, validate_message(id) AS verified "
+            cur.execute("SELECT *, id AS message_id, validate_message(id) AS verified "
                         "FROM messages WHERE conversation_id = %s AND id = ANY(%s) ORDER BY id",
                         (conversation_id, ids))
         results = cur.fetchall()
+        verify_receipts(cur, results)
+        cur.execute("SELECT count(*) AS n FROM blocks b LEFT JOIN messages m ON m.block_index = b.index WHERE b.conversation_id = %s AND m.id IS NULL", (conversation_id,))
+        missing = cur.fetchone()["n"]
 
-    all_verified = all(row["verified"] for row in results) if results else True
+    all_verified = not missing and all(row["verified"] for row in results)
     return jsonify({
         "conversation_id": conversation_id,
         "all_verified": all_verified,
-        "results": [dict(r) for r in results],
+        "missing_messages": missing,
+        "legacy_attachments": sum(r.get("legacy_attachment",False) for r in results),
+        "results": [{"message_id": r["message_id"], "verified": r["verified"]} for r in results],
     }), 200

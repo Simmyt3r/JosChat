@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 import pytest
 
-from blockchain import hash_message
+from utils.integrity import payload_hash, receipt_signature
 
 USER_ID = "11111111-1111-1111-1111-111111111111"
 CIPHERTEXT = "bm90IHJlYWxseSBjaXBoZXJ0ZXh0"
@@ -32,6 +32,11 @@ class FakeAuth:
 def send(monkeypatch, client):
     def _send(conversation_id, rows, **extra):
         route_cursors = []
+        if rows and rows[0] is not None:
+            rows = [rows[0], {"is_group": False, "key_epoch": 1}, *rows[1:]]
+        for row in rows:
+            if isinstance(row, dict) and "id" in row and "idx" not in row:
+                row.setdefault("block_index", 7); row.setdefault("block_hash", "h" * 64); row.setdefault("encrypted_content", CIPHERTEXT)
 
         @contextmanager
         def route_db(commit=False):
@@ -46,6 +51,7 @@ def send(monkeypatch, client):
         monkeypatch.setattr("utils.auth_helpers.get_supabase_auth", lambda: FakeAuth())
         monkeypatch.setattr("utils.auth_helpers.db_cursor", auth_db)
         monkeypatch.setattr("routes.messages.db_cursor", route_db)
+        monkeypatch.setattr("routes.messages.verify_receipts", lambda cur, rows: rows)
         res = client.post(
             "/api/messages/send",
             json={"conversation_id": conversation_id, "encrypted_content": CIPHERTEXT, **extra},
@@ -62,7 +68,7 @@ def test_the_block_records_the_sender_and_the_conversation(send):
 
     (sql, params), = [e for e in cur.executed if "add_block" in e[0]]
     assert "add_block(%s, %s::uuid, %s)" in sql
-    assert params == (hash_message(CIPHERTEXT), USER_ID, 42)     # ciphertext hash, sender, conversation
+    assert params == (payload_hash(CIPHERTEXT), USER_ID, 42)     # ciphertext hash, sender, conversation
     assert CIPHERTEXT not in params                                # plaintext/ciphertext itself is never chained
 
 

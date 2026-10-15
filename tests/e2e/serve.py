@@ -1,6 +1,7 @@
 """Serves the real app on :5055 with dummy credentials, for the browser tests."""
 import os, pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+os.environ.setdefault("LEDGER_SIGNING_KEY","browser-test-only-key")
 os.environ.update(
     SUPABASE_URL="https://example.supabase.co", SUPABASE_ANON_KEY="sb_publishable_dummy",
     POSTGRES_URL="postgres://u:p@localhost:5432/postgres",

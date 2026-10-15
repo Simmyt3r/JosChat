@@ -44,6 +44,8 @@ def call_as(monkeypatch, client):
     """call_as(user_id)(method, path, rows, json=...) -> (response, cursor)"""
     def make(user_id):
         def _do(method, path, rows, json=None):
+            if path == "/api/calls/start" and rows:
+                rows = [{"is_group": False}, *rows]
             route_cursors = []
 
             @contextmanager
@@ -116,9 +118,9 @@ def test_malformed_start_requests_are_rejected(call_as, body, why):
 # --- accept --------------------------------------------------------------------
 
 def test_the_callee_can_accept_a_ringing_call(call_as):
-    rows = [{"id": 9, "status": "connected", "caller_id": CALLER, "callee_id": CALLEE}]
+    rows = [{"id": 9, "status": "accepted", "caller_id": CALLER, "callee_id": CALLEE}]
     res, cur = call_as(CALLEE)("post", "/api/calls/9/accept", rows)
-    assert res.status_code == 200 and res.get_json()["call"]["status"] == "connected"
+    assert res.status_code == 200 and res.get_json()["call"]["status"] == "accepted"
     (sql, params), = [e for e in cur.executed if e[0].startswith("UPDATE calls")]
     assert "ended_at" not in sql               # accepting is not the same as ending
     assert params == (9, CALLEE)
