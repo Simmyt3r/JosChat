@@ -1,5 +1,5 @@
 """Regression tests for the authenticated, paginated call history endpoint."""
-from tests.test_calls_route import CALLER, OUTSIDER
+from test_calls_route import CALLER, OUTSIDER, call_as
 
 
 def test_history_only_queries_own_calls(call_as):
