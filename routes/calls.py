@@ -108,7 +108,7 @@ def accept_call(call_id):
 def end_call(call_id):
     data = request.get_json(silent=True) or {}
     status = data.get("status", "ended")
-    if status not in ("connected", "missed", "ended", "failed"):
+    if status not in ("missed", "ended", "failed"):
         status = "ended"
 
     with db_cursor(commit=True) as cur:
@@ -116,6 +116,7 @@ def end_call(call_id):
             """
             UPDATE calls SET status = %s, ended_at = now()
             WHERE id = %s AND (caller_id = %s OR callee_id = %s)
+              AND status IN ('initiated', 'connected')
             RETURNING *
             """,
             (status, call_id, g.profile["id"], g.profile["id"]),
@@ -125,6 +126,41 @@ def end_call(call_id):
     if not call:
         return jsonify({"error": "Call not found"}), 404
     return jsonify({"call": dict(call)}), 200
+
+
+@calls_bp.route("/history", methods=["GET"])
+@require_auth
+def all_call_history():
+    """Private, paginated history across all conversations."""
+    try:
+        limit = int(request.args.get("limit", "40"))
+        offset = int(request.args.get("offset", "0"))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid pagination"}), 400
+    if not 1 <= limit <= 100 or offset < 0:
+        return jsonify({"error": "Pagination out of range"}), 400
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id, c.conversation_id, c.caller_id, c.callee_id,
+                   c.call_type, c.status, c.started_at, c.ended_at,
+                   caller.username AS caller_username,
+                   callee.username AS callee_username
+            FROM calls c
+            LEFT JOIN profiles caller ON caller.id = c.caller_id
+            LEFT JOIN profiles callee ON callee.id = c.callee_id
+            WHERE (c.caller_id = %s OR c.callee_id = %s)
+              AND EXISTS (
+                SELECT 1 FROM conversation_participants cp
+                WHERE cp.conversation_id = c.conversation_id AND cp.user_id = %s
+              )
+            ORDER BY c.started_at DESC, c.id DESC
+            LIMIT %s OFFSET %s
+            """,
+            (g.profile["id"], g.profile["id"], g.profile["id"], limit, offset),
+        )
+        calls = cur.fetchall()
+    return jsonify({"calls": [dict(c) for c in calls], "limit": limit, "offset": offset}), 200
 
 
 @calls_bp.route("/<int:conversation_id>", methods=["GET"])
