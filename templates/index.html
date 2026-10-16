@@ -238,6 +238,9 @@
         <button type="button" class="btn btn-secondary btn-compact" id="outbox-retry">Retry</button>
       </div>
 
+      <button type="button" class="btn btn-secondary group-start" id="call-history-btn" aria-haspopup="dialog">
+        <svg class="icon" aria-hidden="true"><use href="#i-phone" /></svg><span>Call history</span>
+      </button>
       <div class="side-scroll">
         <button type="button" class="new-chat-row" id="new-chat-row" hidden>
           <span class="avatar avatar-add" aria-hidden="true"><svg class="icon"><use href="#i-plus" /></svg></span>
@@ -404,6 +407,15 @@
     </form>
   </dialog>
 
+  <dialog id="call-history-dialog" class="dialog" aria-labelledby="call-history-title">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem">
+      <h2 id="call-history-title">Call history</h2>
+      <button type="button" class="icon-btn" id="close-call-history" aria-label="Close call history"><svg class="icon"><use href="#i-x" /></svg></button>
+    </div>
+    <p class="field-msg">Your voice and video calls, newest first.</p>
+    <div id="call-history-results" role="status" aria-live="polite" style="max-height:55vh;overflow:auto"></div>
+    <button type="button" class="btn btn-secondary" id="more-call-history" hidden>Load more</button>
+  </dialog>
   <dialog id="incoming-call-dialog" class="dialog call-dialog" aria-labelledby="incoming-call-title">
     <div class="call-ring">
       <span class="avatar call-avatar" id="incoming-call-avatar" aria-hidden="true"></span>
