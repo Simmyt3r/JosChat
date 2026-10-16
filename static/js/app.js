@@ -2711,6 +2711,60 @@ function startDurationTimer() {
 }
 
 // ---------------------------------------------------------------------------
+// Private call-history panel. Only authenticated users can fetch records.
+// ---------------------------------------------------------------------------
+let callHistoryOffset = 0;
+let callHistoryLoading = false;
+async function loadCallHistory(reset = false) {
+  if (!accessToken || callHistoryLoading) return;
+  const list = document.getElementById("call-history-results");
+  const more = document.getElementById("more-call-history");
+  if (reset) { callHistoryOffset = 0; list.replaceChildren(); }
+  callHistoryLoading = true;
+  more.disabled = true;
+  try {
+    const res = await apiFetch(`/calls/history?limit=30&offset=${callHistoryOffset}`);
+    if (!res) throw new Error("Unable to retrieve call history");
+    if (!res.ok) throw new Error("Unable to retrieve call history");
+    const data = await res.json();
+    const rows = Array.isArray(data.calls) ? data.calls : [];
+    for (const call of rows) {
+      const row = document.createElement("div");
+      row.className = "new-chat-row";
+      row.style.cssText = "display:block;padding:12px;border-bottom:1px solid var(--border, #394052)";
+      const peer = call.caller_id === currentProfile.id ? call.callee_username : call.caller_username;
+      const direction = call.caller_id === currentProfile.id ? "Outgoing" : "Incoming";
+      const heading = document.createElement("strong");
+      heading.textContent = `${direction} ${call.call_type === "video" ? "video" : "voice"} call · @${peer || "Unknown"}`;
+      const details = document.createElement("p");
+      details.className = "field-msg";
+      const when = new Date(call.started_at);
+      const duration = call.ended_at ? Math.max(0, Math.floor((new Date(call.ended_at) - when) / 1000)) : null;
+      details.textContent = `${call.status} · ${Number.isNaN(+when) ? "Unknown date" : when.toLocaleString()}${duration !== null ? " · " + Math.floor(duration / 60) + "m " + duration % 60 + "s" : ""}`;
+      row.append(heading, details);
+      list.append(row);
+    }
+    callHistoryOffset += rows.length;
+    more.hidden = rows.length < 30;
+    if (!callHistoryOffset) list.textContent = "No calls yet.";
+  } catch (error) {
+    const notice = document.createElement("p");
+    notice.textContent = error.message || "Unable to load calls";
+    list.append(notice);
+  } finally {
+    callHistoryLoading = false;
+    more.disabled = false;
+  }
+}
+document.getElementById("call-history-btn")?.addEventListener("click", () => {
+  if (!accessToken) return;
+  openCallDialog("call-history-dialog");
+  loadCallHistory(true);
+});
+document.getElementById("close-call-history")?.addEventListener("click", () => closeCallDialog("call-history-dialog"));
+document.getElementById("more-call-history")?.addEventListener("click", () => loadCallHistory());
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
