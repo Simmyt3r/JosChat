@@ -156,7 +156,8 @@ sequenceDiagram
  API->>DB: Update initiated to connected
  Callee->>RT: SDP answer / ICE
  RT-->>Caller: Answer / ICE
- Caller<<->>Callee: WebRTC audio/video
+ Caller-->>Callee: WebRTC audio/video media exchange
+ Callee-->>Caller: WebRTC audio/video media exchange
  Caller->>API: POST /calls/{id}/end
  API->>DB: Mark terminal outcome / ended_at
 ```
