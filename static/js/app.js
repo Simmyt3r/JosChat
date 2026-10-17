@@ -430,6 +430,7 @@ async function startSession(data) {
 function showChatHome() {
   paintAvatar($("me-avatar"), currentProfile.username);
   $("whoami").textContent = `@${currentProfile.username}`;
+  $("admin-dashboard-link").hidden = currentProfile.role !== "admin";
   showView("chat");
   showList();
   keysReady = initMyKeys();
