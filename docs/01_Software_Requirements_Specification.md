@@ -134,3 +134,45 @@ Supabase Auth and Realtime and Cloudinary are external dependencies; WebRTC conn
 
 ## 10. Change control
 After the release freeze, new requirements need explicit approval and a new baseline. Security and defect fixes must retain regression coverage and preserve historical messages, calls and integrity-chain data.
+
+
+## 11. Plain-language explanation of the requirements
+
+### What is a requirement?
+A requirement is a rule the software must follow. It is not an announcement that the feature works. For example, "Only group members may read messages" describes the expected behaviour. A test must then sign in as a non-member and check that the server denies access.
+
+### How someone uses the system, from beginning to end
+A new person visits the website, creates an account, and supplies an email address, username, phone number and password. The account may need email confirmation depending on the authentication configuration. Once signed in, they search for another username and create or open a conversation. They can then send text and supported files, make direct voice or video calls, and review their own call history.
+
+An administrator starts as an ordinary registered account. An authorised operator assigns that account the admin role in the database. After signing in, the administrator sees an Admin link and can open the dashboard. The server still checks the admin role for each request; a hidden button is not a security control.
+
+### What happens if things go wrong?
+- **Wrong password:** login fails with a useful message; no chat data is shown.
+- **Expired session:** the app attempts a safe token refresh; if it fails, the user signs in again.
+- **No internet:** an eligible message may wait in the outbox until connectivity returns.
+- **Wrong chat ID:** the server refuses access to a conversation that the user does not belong to.
+- **Rejected attachment:** the app explains that the type, size or transfer failed.
+- **Call not answered:** the result is recorded accurately instead of pretending the call connected.
+- **Integrity mismatch:** a suspicious message is flagged; the database must not silently rewrite the history.
+
+### Requirement examples
+**FR-06, private conversation:** Given Ama and Ben share a chat but Chris does not, when Chris requests that chat's messages, the server must refuse. The same rule holds if Chris changes the conversation ID in a request.
+
+**FR-11, offline retry:** Given a message was queued while offline, when the device reconnects and retries it twice, exactly one final message should appear in the conversation.
+
+**FR-15, administrator:** Given Ben is a regular user, when he opens the dashboard address or requests its statistics directly, he must not receive admin data.
+
+### Terms in everyday language
+| Term | Meaning |
+|---|---|
+| Authentication | Checking who is signing in |
+| Authorisation | Deciding what that person is allowed to do |
+| Encryption | Turning a message into unreadable data before it is sent |
+| Message integrity | Checking whether the stored message has been changed |
+| PWA | A website that can also behave like an installed app |
+| Realtime | Updates that arrive without repeatedly refreshing the page |
+| API | The application's secure connection between screen and server |
+| RLS | Database rules limiting which records a user can see |
+
+### How approval works
+A requirement is accepted only after someone runs its matching test, records the result and checks that no privacy or data-loss issue remains. A green deployment indicator is only the start, not the finish.
