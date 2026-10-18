@@ -101,3 +101,64 @@ A prior Supabase release migration was recorded as applied; counts observed at t
 
 ## 10. Release disposition
 **Release candidate: feature frozen; production certification pending evidence.** Any “PASS” value must be entered only after actual execution and review.
+
+
+## 11. How to carry out testing in simple terms
+
+A test is a repeatable way to check that Joschat does what it promises. Each test has **starting conditions**, **actions**, **expected results**, and **actual results**. Never label a case "Passed" until the actions have been performed and the result has been observed.
+
+### Before testing
+1. Prepare two test users, one standard user and one administrator, with permission to use them.
+2. Use a test conversation rather than anyone's private messages.
+3. Note the website, browser, database environment and GitHub commit being tested.
+4. Record screenshots or logs carefully, hiding tokens, messages and passwords.
+5. When possible, perform risky integrity or database tests only against an isolated test database.
+
+### Example A: Can two people exchange messages?
+1. Sign in as User A in one browser.
+2. Sign in as User B in another browser or browser profile.
+3. Create a direct conversation and send a short sample message.
+4. Confirm User B receives it without seeing a stranger's conversations.
+5. Restart User B's page and confirm the sample history remains visible.
+6. Mark **Pass** only if every expected step worked.
+
+### Example B: Can a stranger open the same chat?
+1. Create a third user who is not a participant.
+2. Attempt to fetch the test conversation with its known ID through the API.
+3. Expected: access is denied and the response contains no private messages.
+4. If the conversation appears, mark **Fail**, record a high-severity defect, and stop the release.
+
+### Example C: Can the administrator open the dashboard?
+1. Log in as an account with a verified admin role.
+2. Open Admin from the chat header in the same browser tab.
+3. Confirm statistics, users and conversation sections load.
+4. Log in as a standard user and request the admin API.
+5. Expected: the standard user receives an access-denied response.
+
+### Example D: Does call history match real activity?
+Use two browsers to start, answer and end one voice call. Then make an unanswered call. Compare the date, direction and status on each user's Call history page. Load the next page if enough records exist. Avoid assuming that a call record proves real audio transmission: listen to confirm both sides.
+
+### Evidence flow
+```mermaid
+flowchart TD
+ A["Prepare test account and case"] --> B["Perform exact steps"]
+ B --> C["Write what happened"]
+ C --> D{Matches expectation?}
+ D -->|Yes| E["Mark Pass and save evidence"]
+ D -->|No| F["Mark Fail, file issue and retest after fix"]
+```
+
+### Common test statuses
+| Status | Meaning |
+|---|---|
+| Not Run | Nobody has executed the test yet |
+| Pass | Observed result matches the requirement |
+| Fail | Observed result contradicts the requirement |
+| Blocked | A dependency prevents the test from starting |
+| Not Applicable | The tested release does not include the behaviour |
+
+### What a useful defect report contains
+Title, environment, date, reproduction steps, what should have happened, what actually happened, screenshots or safe logs, severity, affected accounts (without secrets), and the build identifier. Re-run the original steps after a fix rather than assuming a code change solved the problem.
+
+### Quality gate explained
+The application stays a release candidate if login, chat privacy, admin authorisation, encryption, calling or data preservation cannot be demonstrated. This is a safety decision, not a judgement about the developer.
