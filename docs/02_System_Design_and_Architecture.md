@@ -209,3 +209,52 @@ GitHub `Simmyt3r/JosChat` -> Vercel build -> Flask API/PWA at `joschat.vercel.ap
 
 ## 10. Architectural trade-offs
 Serverless avoids persistent backend sockets but relies on Supabase Realtime for signalling; browser crypto protects plaintext but complicates recovery and cross-device key reuse; append-only blockchain validation improves integrity evidence but does not independently authenticate human identity; direct PostgreSQL backend access requires particularly careful endpoint authorization. These trade-offs inform the QA gates.
+
+
+## 11. Understanding the architecture without technical experience
+
+Think of Joschat as four cooperating parts. The **screen in your browser** lets you type, read and call. The **Flask server** checks requests and handles the records. **Supabase** keeps accounts, messages, call records and live signals. **Cloudinary** handles uploaded media. None of these systems should be assumed to replace the others.
+
+### Follow one message
+```mermaid
+flowchart LR
+ A["1. Type message"] --> B["2. Lock/encrypt on device"]
+ B --> C["3. Server checks permission"]
+ C --> D["4. Store encrypted message and integrity record"]
+ D --> E["5. Notify other participant"]
+ E --> F["6. Unlock/decrypt on their device"]
+```
+
+The server needs to know *who* is sending a message and *which conversation* it belongs to. It does not need the plain message text. The integrity record is comparable to a seal on a package: it can help detect alteration, but does not prove the package's claims are true.
+
+### Follow one call
+```mermaid
+flowchart TD
+ A["Tap the phone or camera"] --> B["Joschat creates a call record"]
+ B --> C["Other person receives ringing signal"]
+ C --> D{Answer?}
+ D -->|Yes| E["Devices exchange audio/video using WebRTC"]
+ D -->|No| F["Call is recorded as unanswered/declined"]
+ E --> G["Hang up and record outcome"]
+```
+
+The call record contains metadata such as the participants, type, time and status. It is not a recording of the audio or video. Browser permissions and network firewalls can prevent a connection even when a call record exists.
+
+### Why there are two separate permission checks
+The Flask API checks account role and conversation membership before serving protected data. Supabase also has row-level security for browser-accessible tables. These are separate protections. Removing one because the other exists increases risk.
+
+### Why the database has several tables
+- `profiles` describes accounts, their public usernames and administrative status.
+- `conversations` identifies one discussion.
+- `conversation_participants` records which accounts belong to a discussion.
+- `messages` stores individual encrypted messages linked to discussions.
+- `blocks` stores evidence used to check whether message records were altered.
+- `calls` stores the history of voice/video attempts and outcomes.
+
+For example, a conversation can include several participants and many messages, but one message belongs to one conversation. A call belongs to a conversation and identifies both ends.
+
+### What the diagrams mean
+A **box** is a person, process or application. An **arrow** shows information moving or one action leading to another. A **diamond** is a question with more than one possible outcome. An **ER diagram** shows relationships among database tables. A **sequence diagram** reads downward in time and shows which component acts next.
+
+### Important limitations
+End-to-end encryption depends on users protecting their keys and passphrases. The offline queue does not guarantee instant delivery. Realtime signalling does not guarantee a connected call. A database migration or successful build is not a complete application test.
