@@ -116,3 +116,62 @@ Supabase previously warned leaked-password protection was disabled; enabling it 
 
 ## 12. Change management and signoff
 All post-freeze modifications must be release-blocker fixes with tests, review, documented migration and rollback. Production certification requires signoff against the QA matrix. Do not describe a commit or deployment as “validated” solely because it built.
+
+
+## 13. Straightforward operator walkthrough
+
+This guide is intended for whoever manages Joschat on GitHub, Vercel and Supabase. **Do not make a production database change simply to clear a warning.** Every change needs a backup, a reason and a way to recover.
+
+### Understand the three main dashboards
+- **GitHub:** where application code and documentation are stored, reviewed and versioned.
+- **Vercel:** where Joschat is built and published to its website.
+- **Supabase:** where accounts, messages and call records live, and where database permissions are enforced.
+
+### Safe release in nine steps
+1. Choose the exact GitHub commit intended for release.
+2. Check whether the automated tests passed for that commit.
+3. Review the pending changes for secrets and accidental data deletion.
+4. Take a database backup and confirm that it can be restored.
+5. Compare new migrations with the database's already applied migration history.
+6. Apply only approved missing migrations, in the correct order.
+7. Check that message, call and integrity-record counts have not changed unexpectedly.
+8. Let Vercel deploy the intended commit and verify that the displayed commit matches.
+9. Log in as a normal user and an administrator, and perform the smoke tests before signoff.
+
+```mermaid
+flowchart TD
+ A["Review commit"] --> B["Tests and backup"]
+ B --> C["Apply missing safe migrations"]
+ C --> D["Check database records"]
+ D --> E["Deploy to Vercel"]
+ E --> F["Test app and admin"]
+ F --> G{Everything critical works?}
+ G -->|Yes| H["Record approval"]
+ G -->|No| I["Stop release and investigate"]
+```
+
+### If administrators cannot log in
+First establish whether the user has signed into `/app` on the same browser tab. Next check the server's `/api/auth/me` response to see which account is recognised and whether its role is admin. Then check `/api/admin/stats`: **401** means not authenticated, **403** means authenticated but not permitted, and **5xx** indicates a server problem. Do not bypass administrator checks to make the page load.
+
+### If a message cannot be delivered
+Check connectivity and the offline queue. Verify the session remains valid. Inspect application errors without printing plaintext messages or access tokens. Confirm database and Realtime health. Test retry using a sample message before assuming the issue has been fixed.
+
+### If a migration fails
+Stop and capture the specific error. Check which statements ran and whether the migration history was recorded. Compare actual database structure with the expected schema. Recover using reviewed reversible changes or a verified backup; do not remove the immutable message ledger.
+
+### If a new deployment breaks the app
+The usual first recovery is to return Vercel to a previously tested deployment, **provided the old code is compatible with the current database**. Rolling back application code alone does not undo a database migration.
+
+### Maintenance journal
+| Record | Example field |
+|---|---|
+| Date and operator | Who handled the change and when |
+| Change summary | Bug fixed or security rule improved |
+| Before/after | Git SHA and deployment ID |
+| Database effects | Migration name and verified row counts |
+| Tests | Tests executed and their outcome |
+| Recovery | Known-good deployment and backup location |
+| Approval | Release decision and reviewer |
+
+### Terms worth knowing
+A **migration** changes database structure. A **deployment** publishes software. A **rollback** returns to a previous working version. A **backup** is a recoverable copy of data. A **smoke test** quickly checks that the most important functions still work. A **security advisory** is a warning to investigate, not an instruction to run arbitrary SQL.
