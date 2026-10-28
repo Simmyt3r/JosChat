@@ -13,3 +13,13 @@ do $$ begin
         create publication supabase_realtime;
     end if;
 end $$;
+
+-- Realtime stand-in for testing authorization policies on plain PostgreSQL.
+drop schema if exists realtime cascade;
+create schema realtime;
+create table if not exists realtime.messages (topic text, extension text);
+alter table realtime.messages enable row level security;
+grant usage on schema realtime to anon, authenticated;
+grant select, insert on realtime.messages to anon, authenticated;
+create or replace function realtime.topic() returns text language sql stable as
+$$ select coalesce(current_setting('realtime.topic', true), '') $$;

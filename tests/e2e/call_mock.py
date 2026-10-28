@@ -39,6 +39,7 @@ def api(route, request):
     except Exception:
         body = {}
     if path == "/api/config": return j({"supabase_url": "https://x.supabase.co", "supabase_anon_key": "x", "cloudinary_cloud_name": "demo"})
+    if path == "/api/calls/ice-servers": return j({"ice_servers": [{"urls": "stun:stun.l.google.com:19302"}]})
     if path == "/api/auth/register":
         key, err = validate_public_key(body.get("public_key"))
         if err: return j({"error": err}, 400)

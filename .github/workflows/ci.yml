@@ -83,7 +83,7 @@ jobs:
       - name: Test browser encryption (Node)
         run: |
           node --version
-          node --test tests/js/crypto.test.js
+          node --test tests/js/*.test.js
 
       - name: Test messaging UI and offline service worker
         if: matrix.python-version == '3.12'
