@@ -52,7 +52,7 @@ def test_protected_routes_require_a_token(client):
         assert client.get(path).status_code == 401, path
 
 
-def test_missing_env_keeps_health_reachable_and_reports_why(monkeypatch):
+def test_missing_env_keeps_health_reachable_without_public_diagnostics(monkeypatch):
     # A missing variable must not crash the whole function at import time.
     monkeypatch.setattr(Config, "SUPABASE_URL", None)
     from app import create_app
@@ -61,7 +61,7 @@ def test_missing_env_keeps_health_reachable_and_reports_why(monkeypatch):
     health = c.get("/api/health")
     assert health.status_code == 500
     assert health.get_json()["status"] == "misconfigured"
-    assert "SUPABASE_URL" in health.get_json()["detail"]
+    assert "detail" not in health.get_json()
 
     other = c.post("/api/auth/login", json={"email": "a@b.co", "password": "secret1"})
     assert other.status_code == 500 and "misconfigured" in other.get_json()["error"]
@@ -69,3 +69,32 @@ def test_missing_env_keeps_health_reachable_and_reports_why(monkeypatch):
     assert c.get("/").status_code == 200
     assert c.get("/app").status_code == 200
     assert c.get("/static/css/landing.css").status_code == 200
+
+
+def test_api_responses_are_not_cached_and_have_browser_protections(client):
+    for path in ('/api/config', '/api/auth/me', '/api/not-found'):
+        response = client.get(path)
+        assert response.headers['Cache-Control'] == 'no-store'
+        assert response.headers['X-Content-Type-Options'] == 'nosniff'
+        assert response.headers['X-Frame-Options'] == 'DENY'
+        assert response.headers['Referrer-Policy'] == 'no-referrer'
+
+
+def test_cors_defaults_to_same_origin_and_only_allows_configured_origins(monkeypatch):
+    from app import create_app
+    monkeypatch.setattr(Config, 'CORS_ORIGINS', [])
+    c = create_app().test_client()
+    assert 'Access-Control-Allow-Origin' not in c.get('/api/config', headers={'Origin': 'https://evil.test'}).headers
+    monkeypatch.setattr(Config, 'CORS_ORIGINS', ['https://chat.test'])
+    c = create_app().test_client()
+    for origin, allowed in [('https://chat.test', True), ('https://evil.test', False)]:
+        r = c.get('/api/config', headers={'Origin': origin})
+        assert (r.headers.get('Access-Control-Allow-Origin') == origin) is allowed
+        assert 'Access-Control-Allow-Credentials' not in r.headers
+
+
+def test_debug_may_show_configuration_diagnostics(monkeypatch):
+    monkeypatch.setattr(Config, 'SUPABASE_URL', None)
+    monkeypatch.setattr(Config, 'DEBUG', True)
+    from app import create_app
+    assert 'SUPABASE_URL' in create_app().test_client().get('/api/health').get_json()['detail']

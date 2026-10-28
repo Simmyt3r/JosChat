@@ -246,3 +246,15 @@ def test_browser_roles_cannot_call_chain_functions(db, role):
                "validate_chain()", "validate_conversation(bigint)"):
         db.execute("select has_function_privilege(%s, %s, 'execute')", (role, fn))
         assert db.fetchone() == (False,), f"{role} can execute {fn}"
+
+
+def test_rehashed_index_gap_is_rejected_by_production_validator(db):
+    conv = _conversation(db)
+    _send(db, conv, U1)
+    _send(db, conv, U2)
+    db.execute("delete from messages")
+    db.execute("update blocks set index = 9 where index = 1")
+    db.execute("update blocks set block_hash = compute_block_hash(index, created_at, message_hash, "
+               "sender_id, conversation_id, previous_hash) where index = 9")
+    db.execute("select is_valid, invalid_index from validate_chain()")
+    assert db.fetchone() == (False, 9)

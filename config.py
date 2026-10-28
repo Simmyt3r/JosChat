@@ -12,6 +12,7 @@ Supabase REST API, which is why there's no service-role key in this list.
 """
 
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,6 +22,10 @@ class Config:
     # Flask
     SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
     DEBUG = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    # Same-origin requests work without CORS. Only explicitly listed extra
+    # frontend origins may read API responses; browser cookies are not used.
+    CORS_ORIGINS = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip()]
+    WEBRTC_ICE_SERVERS = os.environ.get("WEBRTC_ICE_SERVERS", '[{"urls":"stun:stun.l.google.com:19302"}]')
 
     # Supabase Auth (used ONLY for sign-up/sign-in/token verification —
     # all other data access goes through direct Postgres, see below).
@@ -84,7 +89,32 @@ class Config:
         return dsn
 
     @classmethod
+    def ice_servers(cls):
+        """Public STUN configuration only; relay credentials use an auth route."""
+        servers = json.loads(cls.WEBRTC_ICE_SERVERS)
+        if not isinstance(servers, list) or not servers:
+            raise ValueError("WEBRTC_ICE_SERVERS must be a nonempty JSON array")
+        for server in servers:
+            if not isinstance(server, dict) or set(server) - {"urls", "username", "credential"}:
+                raise ValueError("Invalid ICE server fields")
+            urls = server.get("urls")
+            urls = [urls] if isinstance(urls, str) else urls
+            if not isinstance(urls, list) or not urls or any(
+                not isinstance(url, str) or not url.startswith(("stun:", "stuns:", "turn:", "turns:")) for url in urls
+            ):
+                raise ValueError("ICE server urls must use STUN or TURN schemes")
+            if any(url.startswith(("turn:", "turns:")) for url in urls) and not (
+                isinstance(server.get("username"), str) and server["username"]
+                and isinstance(server.get("credential"), str) and server["credential"]
+            ):
+                raise ValueError("TURN servers require username and credential")
+        return servers
+
+    @classmethod
     def validate(cls):
+        cls.ice_servers()
+        if "*" in cls.CORS_ORIGINS:
+            raise ValueError("CORS_ORIGINS must list explicit origins")
         missing = []
         if not cls.SUPABASE_URL:
             missing.append("SUPABASE_URL")

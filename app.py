@@ -12,7 +12,7 @@ API stay fully stateless and serverless-friendly.
 
 import psycopg2
 import psycopg2.errors
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from config import Config
@@ -47,7 +47,17 @@ def create_app():
         config_error = f"{type(exc).__name__}: {exc}"
         app.logger.error(f"Configuration error: {config_error}")
 
-    CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+    if Config.CORS_ORIGINS:
+        CORS(app, resources={r"/api/*": {"origins": Config.CORS_ORIGINS}}, supports_credentials=False)
+
+    @app.after_request
+    def secure_response(response):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        if request.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     if config_error is None:
         init_cloudinary()
@@ -66,15 +76,18 @@ def create_app():
             # problems; the landing page does not depend on an API or database.
             if _req.path in ("/", "/app", "/sw.js", "/api/health") or _req.path.startswith("/static/"):
                 return None
-            return jsonify({
-                "error": "Server misconfigured — missing environment variables.",
-                "detail": config_error,
-            }), 500
+            payload = {"error": "Server misconfigured — check server logs."}
+            if app.debug:
+                payload["detail"] = config_error
+            return jsonify(payload), 500
 
     @app.route("/api/health", methods=["GET"])
     def health():
         if config_error:
-            return jsonify({"status": "misconfigured", "detail": config_error}), 500
+            payload = {"status": "misconfigured"}
+            if app.debug:
+                payload["detail"] = config_error
+            return jsonify(payload), 500
         return jsonify({"status": "ok", "service": "joschat-api"}), 200
 
     @app.route("/api/config", methods=["GET"])

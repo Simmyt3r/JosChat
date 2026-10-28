@@ -41,7 +41,7 @@ class Block:
         self.sender_id = sender_id
         self.conversation_id = conversation_id
         self.previous_hash = previous_hash
-        self.block_hash = block_hash or self.compute_hash()
+        self.block_hash = self.compute_hash() if block_hash is None else block_hash
 
     def compute_hash(self):
         if self.sender_id is None and self.conversation_id is None:
@@ -70,7 +70,7 @@ class Blockchain:
     GENESIS_PREVIOUS_HASH = "0" * 64
 
     def __init__(self, blocks=None):
-        self.chain = blocks or [self._genesis_block()]
+        self.chain = [self._genesis_block()] if blocks is None else list(blocks)
 
     def _genesis_block(self):
         return Block(0, self._now(), "GENESIS", self.GENESIS_PREVIOUS_HASH)
@@ -97,14 +97,31 @@ class Blockchain:
         self.chain.append(new_block)
         return new_block
 
-    def validate_chain(self):
-        """Returns (is_valid: bool, first_invalid_index: int | None)."""
-        for i in range(1, len(self.chain)):
-            current, previous = self.chain[i], self.chain[i - 1]
+    def validate_chain(self, checkpoint=None):
+        """Check structure, optionally against a separately retained (index, hash).
+
+        A checkpoint must come from a trusted earlier observation, not from the
+        same potentially rewritten history. Appending after it remains valid.
+        This Python reference does not validate production SQL timestamp formats.
+        """
+        if not self.chain:
+            return False, 0
+        for i, current in enumerate(self.chain):
+            if current.index != i:
+                return False, i
+            if (current.sender_id is None) != (current.conversation_id is None):
+                return False, i
             if current.block_hash != current.compute_hash():
                 return False, current.index
-            if current.previous_hash != previous.block_hash:
+            expected = self.GENESIS_PREVIOUS_HASH if i == 0 else self.chain[i - 1].block_hash
+            if current.previous_hash != expected:
                 return False, current.index
+        if checkpoint is not None:
+            index, expected_hash = checkpoint
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                raise ValueError("Checkpoint index must be a nonnegative integer")
+            if index >= len(self.chain) or self.chain[index].block_hash != expected_hash:
+                return False, index
         return True, None
 
 

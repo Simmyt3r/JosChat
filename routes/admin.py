@@ -25,7 +25,9 @@ the person signed in isn't one, while every actual read happens through
 @require_admin here.
 """
 
-from flask import Blueprint, jsonify, g
+import re
+
+from flask import Blueprint, jsonify, g, request
 
 from extensions import db_cursor
 from utils.auth_helpers import require_auth, require_admin
@@ -82,11 +84,45 @@ def reinstate_user(user_id):
 @require_auth
 @require_admin
 def validate_blockchain():
+    checkpoint_index = request.args.get("checkpoint_index")
+    checkpoint_hash = request.args.get("checkpoint_hash")
+    if checkpoint_index is not None or checkpoint_hash is not None:
+        if (checkpoint_index is None or not re.fullmatch(r"[0-9]{1,19}", checkpoint_index)
+                or int(checkpoint_index) > 9223372036854775807
+                or checkpoint_hash is None or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_hash)):
+            return jsonify({"error": "Supply checkpoint_index and a lowercase SHA-256 checkpoint_hash"}), 400
     with db_cursor() as cur:
         cur.execute("SELECT * FROM validate_chain()")
         result = cur.fetchone()
-    report = dict(result) if result else {"is_valid": True, "invalid_index": None, "blocks_checked": 0}
+        report = dict(result) if result else {"is_valid": False, "invalid_index": None, "blocks_checked": 0}
+        if checkpoint_index is not None:
+            cur.execute("SELECT block_hash FROM blocks WHERE index = %s", (int(checkpoint_index),))
+            anchor = cur.fetchone()
+            report["checkpoint_matches"] = bool(anchor and anchor["block_hash"] == checkpoint_hash)
+            if not report["checkpoint_matches"]:
+                report["is_valid"] = False
+                report["invalid_index"] = int(checkpoint_index)
     return jsonify(report), 200
+
+
+@admin_bp.route("/blockchain/checkpoint", methods=["GET"])
+@require_auth
+@require_admin
+def blockchain_checkpoint():
+    """Export an observation for separate trusted retention, not a signature.
+
+    A compromised backend can lie. Retain the original checkpoint outside its
+    trust boundary and use an independent verifier for that attacker model.
+    """
+    with db_cursor() as cur:
+        cur.execute("SELECT index, block_hash, (SELECT is_valid FROM validate_chain()) AS is_valid "
+                    "FROM blocks ORDER BY index DESC LIMIT 1")
+        head = cur.fetchone()
+    if not head:
+        return jsonify({"error": "No blocks to checkpoint"}), 404
+    if not head["is_valid"]:
+        return jsonify({"error": "Cannot checkpoint an inconsistent chain"}), 409
+    return jsonify({"checkpoint_index": head["index"], "checkpoint_hash": head["block_hash"]}), 200
 
 
 @admin_bp.route("/conversations", methods=["GET"])
