@@ -61,6 +61,7 @@ def initialize(conn):
             "INSERT INTO conversation_participants(conversation_id,user_id) VALUES (%s,%s),(%s,%s)",
             (conv, USER_A, conv, USER_B),
         )
+    conn.commit()  # Close any transaction started by the connection context manager.
     conn.autocommit = False
     return conv
 
