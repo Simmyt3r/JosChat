@@ -1,0 +1,112 @@
+name: Dissertation Research Evidence
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - ".github/workflows/research-evidence.yml"
+      - "scripts/collect_research_evidence.py"
+      - "scripts/collect_call_evidence.py"
+      - "blockchain.py"
+      - "supabase/**"
+      - "routes/**"
+      - "static/js/**"
+      - "tests/**"
+      - "requirements.txt"
+  pull_request:
+    paths:
+      - ".github/workflows/research-evidence.yml"
+      - "scripts/collect_research_evidence.py"
+      - "scripts/collect_call_evidence.py"
+      - "blockchain.py"
+      - "supabase/**"
+      - "routes/**"
+      - "static/js/**"
+      - "tests/**"
+      - "requirements.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-integrity:
+    name: Reproduce integrity and benchmark results (isolated Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: joschat_test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d joschat_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install production and testing requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Run real PostgreSQL integration regression tests
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/joschat_test
+        run: python -m pytest tests/test_schema_integration.py -q
+      - name: Run controlled 498-case integrity trials and chain-size timing
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/joschat_test
+          JOSCHAT_EVIDENCE_ALLOW_RESET: "1"
+        run: |
+          python scripts/collect_research_evidence.py --output research-evidence --repeats 15 --seed 20261103
+      - name: Upload reproducible research artifacts, including failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: joschat-postgres-research-evidence
+          path: research-evidence/
+          if-no-files-found: warn
+          retention-days: 90
+
+  chromium-webrtc:
+    name: Repeat two-browser WebRTC harness (mock signalling)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Python requirements and browser
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt playwright==1.55.0
+          python -m playwright install --with-deps chromium
+      - name: Run 5 two-browser calls and record trial logs
+        run: |
+          python -u tests/e2e/serve.py > evidence-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:5055/app; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:5055/app
+          python scripts/collect_call_evidence.py --trials 5 --output call-evidence --timeout 120
+      - name: Upload local WebRTC evidence and server logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: joschat-chromium-webrtc-harness
+          path: |
+            call-evidence/
+            evidence-server.log
+          if-no-files-found: warn
+          retention-days: 90
