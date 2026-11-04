@@ -69,7 +69,7 @@ jobs:
           python scripts/collect_research_evidence.py --output research-evidence --repeats 15 --seed 20261103
       - name: Upload reproducible research artifacts, including failure evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: joschat-postgres-research-evidence
           path: research-evidence/
@@ -102,7 +102,7 @@ jobs:
           python scripts/collect_call_evidence.py --trials 5 --output call-evidence --timeout 120
       - name: Upload local WebRTC evidence and server logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: joschat-chromium-webrtc-harness
           path: |
