@@ -75,3 +75,44 @@ def test_hash_message_is_deterministic_sha256():
     assert hash_message("abc") == hash_message("abc")
     assert hash_message("abc") != hash_message("abd")
     assert len(hash_message("abc")) == 64
+
+
+def test_genesis_modification_is_detected():
+    chain = _chain_with_messages()
+    chain.chain[0].message_hash = 'changed'
+    assert chain.validate_chain() == (False, 0)
+
+
+def test_empty_import_is_not_silently_replaced_with_a_valid_genesis():
+    assert Blockchain([]).validate_chain() == (False, 0)
+
+
+def test_empty_stored_hash_is_not_repaired_during_import():
+    bad = Block(0, "t", "GENESIS", "0" * 64, block_hash="")
+    assert Blockchain([bad]).validate_chain() == (False, 0)
+
+
+def test_rehashed_gap_is_not_a_valid_sequence():
+    chain = _chain_with_messages()
+    chain.chain[-1].index += 1
+    chain.chain[-1].block_hash = chain.chain[-1].compute_hash()
+    assert chain.validate_chain()[0] is False
+
+
+def test_trusted_checkpoint_detects_rewrite_and_truncation_but_allows_append():
+    chain = _chain_with_messages()
+    checkpoint = (chain.last_block.index, chain.last_block.block_hash)
+    chain.add_block(hash_message('later'), ALICE, 1)
+    assert chain.validate_chain(checkpoint) == (True, None)
+    chain.chain[1].message_hash = hash_message('rewritten')
+    for previous, block in zip(chain.chain, chain.chain[1:]):
+        block.previous_hash = previous.block_hash
+        block.block_hash = block.compute_hash()
+    # Internal consistency alone still cannot authenticate the old history.
+    assert chain.validate_chain() == (True, None)
+    assert chain.validate_chain(checkpoint) == (False, checkpoint[0])
+    chain = _chain_with_messages()
+    checkpoint = (chain.last_block.index, chain.last_block.block_hash)
+    chain.chain.pop()
+    assert chain.validate_chain() == (True, None)
+    assert chain.validate_chain(checkpoint) == (False, checkpoint[0])

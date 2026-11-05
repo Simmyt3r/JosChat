@@ -13,6 +13,7 @@ PLAIN_USER = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 MISSING = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 
 ADMIN_ROUTES = [
+    ("get", "/api/admin/blockchain/checkpoint", None),
     ("get", "/api/admin/users", None),
     ("post", f"/api/admin/users/{OTHER_ADMIN}/suspend", None),
     ("post", f"/api/admin/users/{OTHER_ADMIN}/reinstate", None),
@@ -165,11 +166,11 @@ def test_full_chain_audit_reports_tampering(admin_as):
     assert body["is_valid"] is False and body["invalid_index"] == 7
 
 
-def test_full_chain_audit_on_an_empty_chain(admin_as):
+def test_missing_audit_result_is_not_reported_as_valid(admin_as):
     res, cur = admin_as(ADMIN)("get", "/api/admin/blockchain/validate", [None])
     body = res.get_json()
     assert res.status_code == 200
-    assert body == {"is_valid": True, "invalid_index": None, "blocks_checked": 0}
+    assert body == {"is_valid": False, "invalid_index": None, "blocks_checked": 0}
 
 
 def test_conversation_audit_all_clear(admin_as):
@@ -228,3 +229,36 @@ def test_platform_stats_assembles_every_counter(admin_as):
         "total_calls": 7,
         "calls_by_status": {"ended": 5, "missed": 2},
     }
+
+
+@pytest.mark.parametrize('anchor', [None, {'block_hash': 'b' * 64}])
+def test_checkpoint_mismatch_or_truncation_invalidates_an_internally_valid_chain(admin_as, anchor):
+    url = '/api/admin/blockchain/validate?checkpoint_index=4&checkpoint_hash=' + 'a' * 64
+    r, cur = admin_as(ADMIN)('get', url, [{'is_valid': True, 'invalid_index': None, 'blocks_checked': 5}, anchor])
+    assert r.status_code == 200
+    assert r.json['checkpoint_matches'] is False and r.json['is_valid'] is False
+    assert r.json['invalid_index'] == 4
+    assert cur.executed[-1][1] == (4,)
+
+
+def test_matching_historical_checkpoint_allows_later_appends(admin_as):
+    url = '/api/admin/blockchain/validate?checkpoint_index=1&checkpoint_hash=' + 'a' * 64
+    r, _ = admin_as(ADMIN)('get', url, [{'is_valid': True, 'invalid_index': None, 'blocks_checked': 5}, {'block_hash': 'a' * 64}])
+    assert r.json['checkpoint_matches'] and r.json['is_valid']
+
+
+@pytest.mark.parametrize('query', ['checkpoint_index=1', 'checkpoint_hash=' + 'a'*64,
+                                   'checkpoint_index=-1&checkpoint_hash='+'a'*64,
+                                   'checkpoint_index=9999999999999999999999&checkpoint_hash='+'a'*64,
+                                   'checkpoint_index=1&checkpoint_hash=invalid'])
+def test_bad_checkpoint_is_rejected_before_database_query(admin_as, query):
+    r, cur = admin_as(ADMIN)('get', '/api/admin/blockchain/validate?' + query, [])
+    assert r.status_code == 400 and cur is None
+
+
+def test_checkpoint_export_requires_a_consistent_chain(admin_as):
+    r, _ = admin_as(ADMIN)('get', '/api/admin/blockchain/checkpoint', [{'index': 4, 'block_hash': 'a'*64, 'is_valid': True}])
+    assert r.json == {'checkpoint_index': 4, 'checkpoint_hash': 'a'*64}
+    for rows, status in [([], 404), ([{'index': 4, 'block_hash': 'a'*64, 'is_valid': False}], 409)]:
+        r, _ = admin_as(ADMIN)('get', '/api/admin/blockchain/checkpoint', rows)
+        assert r.status_code == status

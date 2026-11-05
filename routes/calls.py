@@ -26,9 +26,18 @@ import uuid
 from flask import Blueprint, request, jsonify, g
 
 from extensions import db_cursor
+from config import Config
 from utils.auth_helpers import require_auth
 
 calls_bp = Blueprint("calls", __name__)
+
+
+@calls_bp.route("/ice-servers", methods=["GET"])
+@require_auth
+def ice_servers():
+    # Relay credentials must never be added to the anonymous /api/config route.
+    # Prefer short-lived provider credentials; authenticated users can see them.
+    return jsonify({"ice_servers": Config.ice_servers()}), 200
 
 
 @calls_bp.route("/start", methods=["POST"])

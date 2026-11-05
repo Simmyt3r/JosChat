@@ -334,8 +334,8 @@ inside Postgres — trigger it via `GET /api/admin/blockchain/validate`.
   available for one-to-one conversations; group calling is out of scope.
 - **Browser tests**: `tests/e2e/` holds Playwright scripts that drive the real UI, including a
   two-browser WebRTC call, with what is real and what is stood in for spelled out in its README.
-- **Call quality**: only a public STUN server is configured; a production
-  deployment behind restrictive NATs/firewalls will need a TURN server
+- **Call quality**: a public STUN server is the default. Configure `WEBRTC_ICE_SERVERS`
+  with authenticated TURN relay entries for restrictive NATs/firewalls
   (e.g. via Twilio or a self-hosted coturn instance) as a fallback. Calling
   also depends on the same Realtime connection messaging does — see the
   "What the browser can do" note above.
@@ -408,3 +408,10 @@ offline persistence across reload, reconnect delivery, lost-response retries,
 token refresh, tamper badges, logout cleanup and mobile overflow. It requires
 `pip install playwright==1.55.0` and `playwright install chromium --with-deps`.
 No test accesses live accounts or messages.
+
+## Security revision and rollout
+
+See [Security revision and deployment](docs/06_Security_Revision_and_Deployment.md)
+for the private-call migrations, required Realtime setting, TURN configuration,
+trusted-checkpoint checks and remaining limitations. Apply the migrations and
+disable Realtime public access before deploying the new call client.

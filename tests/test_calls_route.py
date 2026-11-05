@@ -190,3 +190,23 @@ def test_a_participant_can_read_call_history(call_as):
 def test_a_non_participant_cannot_read_call_history(call_as):
     res, _ = call_as(OUTSIDER)("get", "/api/calls/1", [None])
     assert res.status_code == 403
+
+
+def test_relay_credentials_require_authentication_and_are_not_public(call_as, client, monkeypatch):
+    from config import Config
+    import json
+    settings = [{'urls': 'turns:relay.test:5349', 'username': 'temporary', 'credential': 'relay-secret'}]
+    monkeypatch.setattr(Config, 'WEBRTC_ICE_SERVERS', json.dumps(settings))
+    assert client.get('/api/calls/ice-servers').status_code == 401
+    assert 'relay-secret' not in client.get('/api/config').get_data(as_text=True)
+    response, _ = call_as(CALLER)('get', '/api/calls/ice-servers', [])
+    assert response.json == {'ice_servers': settings}
+    assert response.headers['Cache-Control'] == 'no-store'
+
+
+@pytest.mark.parametrize('value', ['{}', '[]', '[{"urls":"https://evil.test"}]', '[{"urls":"turn:relay.test"}]', '[{"urls":[]}]'])
+def test_invalid_ice_configuration_is_rejected(monkeypatch, value):
+    from config import Config
+    monkeypatch.setattr(Config, 'WEBRTC_ICE_SERVERS', value)
+    with pytest.raises(ValueError):
+        Config.ice_servers()

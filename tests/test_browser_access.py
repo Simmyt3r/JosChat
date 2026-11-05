@@ -195,3 +195,48 @@ def test_schema_can_be_applied_again_and_still_holds(db):
         with pytest.raises(DENIED):
             db.execute("update profiles set role = 'admin'")
         assert len(_rows(db, "select id from messages")) == 1
+
+
+def _signal_call(db):
+    db.execute("insert into calls(conversation_id, caller_id, callee_id, call_type) "
+               "values (1, %s, %s, 'voice') returning id", (ALICE, BOB))
+    return 'call-' + str(db.fetchone()[0])
+
+
+@pytest.mark.parametrize('user', [ALICE, BOB])
+def test_call_members_can_send_and_receive_signals(db, user):
+    topic = _signal_call(db)
+    db.execute("select set_config('realtime.topic', %s, false)", (topic,))
+    with browser(db, user=user):
+        db.execute("insert into realtime.messages(topic, extension) values (%s, 'broadcast')", (topic,))
+        db.execute("select extension from realtime.messages where topic = %s", (topic,))
+        assert db.fetchall() == [('broadcast',)]
+
+
+@pytest.mark.parametrize('role,user', [('authenticated', CAROL), ('anon', None)])
+def test_older_permissive_policy_cannot_expose_call_signals_to_outsiders(db, role, user):
+    topic = _signal_call(db)
+    db.execute('drop policy if exists "old broad access" on realtime.messages')
+    db.execute('create policy "old broad access" on realtime.messages for all to anon, authenticated using (true) with check (true)')
+    try:
+        db.execute("insert into realtime.messages(topic, extension) values (%s, 'broadcast')", (topic,))
+        db.execute("select set_config('realtime.topic', %s, false)", (topic,))
+        with browser(db, role=role, user=user):
+            db.execute("select * from realtime.messages")
+            assert db.fetchall() == []
+            with pytest.raises(DENIED):
+                db.execute("insert into realtime.messages(topic, extension) values (%s, 'broadcast')", (topic,))
+    finally:
+        db.execute('drop policy "old broad access" on realtime.messages')
+
+
+@pytest.mark.parametrize('change', ["update profiles set status = 'suspended' where id = %s",
+                                    "delete from conversation_participants where user_id = %s",
+                                    "update calls set status = 'ended' where caller_id = %s"])
+def test_suspended_removed_or_ended_call_member_is_denied_on_next_join(db, change):
+    topic = _signal_call(db)
+    db.execute(change, (ALICE,))
+    db.execute("select set_config('realtime.topic', %s, false)", (topic,))
+    with browser(db, user=ALICE):
+        with pytest.raises(DENIED):
+            db.execute("insert into realtime.messages(topic, extension) values (%s, 'presence')", (topic,))

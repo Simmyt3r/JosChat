@@ -2554,12 +2554,29 @@ function hangUpActiveCall() {
 
 // --- the peer connection and its signalling channel --------------------------
 
-function joinCallChannel() {
+async function joinCallChannel() {
   const client = ensureSupabaseClient();
   const call = activeCall;
   let offerSent = false;
 
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  let iceServers;
+  try {
+    const response = await apiFetch("/calls/ice-servers");
+    const settings = await readJson(response);
+    if (!response.ok || !Array.isArray(settings.ice_servers) || !settings.ice_servers.length) {
+      throw new Error("Call configuration unavailable");
+    }
+    iceServers = settings.ice_servers;
+    await client.realtime.setAuth(accessToken);
+  } catch (err) {
+    if (activeCall === call) {
+      endCallRow(call.id, "failed");
+      teardownCall("Call setup failed. Please try again.");
+    }
+    return;
+  }
+  if (activeCall !== call) return;
+  const pc = new RTCPeerConnection({ iceServers });
   call.pc = pc;
   call.localStream.getTracks().forEach((track) => pc.addTrack(track, call.localStream));
 
@@ -2584,7 +2601,7 @@ function joinCallChannel() {
     }
   };
 
-  const channel = client.channel(`call-${call.id}`, { config: { broadcast: { self: false }, presence: { key: currentProfile.id } } });
+  const channel = client.channel(`call-${call.id}`, { config: { private: true, broadcast: { self: false }, presence: { key: currentProfile.id } } });
   call.channel = channel;
 
   channel
@@ -2615,7 +2632,12 @@ function joinCallChannel() {
       channel.send({ type: "broadcast", event: "offer", payload: offer });
     })
     .subscribe(async (status) => {
+      if (activeCall !== call) return;
       if (status === "SUBSCRIBED") await channel.track({ online_at: Date.now() });
+      else if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) {
+        endCallRow(call.id, "failed");
+        teardownCall("Call signalling failed. Please try again.");
+      }
     });
 }
 
